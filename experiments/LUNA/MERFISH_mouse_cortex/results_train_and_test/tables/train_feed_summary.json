@@ -1,0 +1,12 @@
+{
+  "X_train_shape": [
+    158379,
+    254
+  ],
+  "Y_train_shape": [
+    158379,
+    2
+  ],
+  "n_sections": 33,
+  "n_classes": 23
+}
