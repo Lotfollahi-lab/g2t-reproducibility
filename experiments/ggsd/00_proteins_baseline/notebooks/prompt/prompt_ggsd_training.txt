@@ -1,0 +1,67 @@
+!pip install -q "diffusers==0.21.4" "huggingface_hub==0.19.4"
+!pip install -q rdkit-pypi
+# --- paths & imports
+import os, sys, json, pathlib, time, numpy as np, torch, matplotlib.pyplot as plt
+REPO = pathlib.Path("/nfs/team361/mv11/GGSD")
+sys.path.append(str(REPO))
+
+from dataset.load_data_generated import LaplacianDatasetNX
+from models.diffusion import SpectralDiffusion
+from models.predictor import Predictor
+%load_ext autoreload
+%autoreload 1         
+%aimport models, dataset, utils
+# --- paths & imports
+import os, sys, json, pathlib, time, numpy as np, torch, matplotlib.pyplot as plt
+from types import SimpleNamespace
+
+# point to the GGSD repo on disk
+REPO = pathlib.Path("/nfs/team361/mv11/GGSD")      # <- change if needed
+sys.path.append(str(REPO))
+
+EXP = pathlib.Path("/nfs/team361/mv11/experiments/ggsd_proteins")  # your run folder
+FIG = EXP / "figs"; FIG.mkdir(parents=True, exist_ok=True)
+CKPT = EXP / "checkpoints"; CKPT.mkdir(parents=True, exist_ok=True)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device:", device)
+
+# lightning models
+from dataset.load_data_generated import LaplacianDatasetNX
+from models.diffusion import SpectralDiffusion
+from models.predictor import Predictor
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+import pickle, networkx as nx
+DATA_DIR = REPO / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DATASET = "proteins"                # this name is used everywhere below
+PKL = DATA_DIR / f"{DATASET}.pkl"
+
+# ensure node ids 0..n-1 and remove isolated nodes (GGSD strips them anyway)
+Gs_clean = []
+for G in Gs:
+    H = nx.convert_node_labels_to_integers(G)
+    iso = [u for u,d in H.degree() if d==0]
+    H.remove_nodes_from(iso)
+    Gs_clean.append(H)
+
+with open(PKL, "wb") as f:
+    pickle.dump(Gs_clean, f)
+print(f"Saved {len(Gs_clean)} graphs → {PKL}")
+
+
+
+------
+with these results and prints:
+device: cuda
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+Cell In[6], line 9
+      7 # ensure node ids 0..n-1 and remove isolated nodes (GGSD strips them anyway)
+      8 Gs_clean = []
+----> 9 for G in Gs:
+     10     H = nx.convert_node_labels_to_integers(G)
+     11     iso = [u for u,d in H.degree() if d==0]
+
+NameError: name 'Gs' is not defined

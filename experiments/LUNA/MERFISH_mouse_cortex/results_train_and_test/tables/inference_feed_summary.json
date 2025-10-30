@@ -1,0 +1,12 @@
+{
+  "section": "mouse2_slice99",
+  "cells_in_section": 5235,
+  "X_test_section_shape": [
+    5235,
+    254
+  ],
+  "Y_true_section_shape": [
+    5235,
+    2
+  ]
+}

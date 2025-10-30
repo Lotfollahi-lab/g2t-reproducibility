@@ -1,0 +1,2 @@
+test/epoch,test/precision,test/Spearman's Rank Correlation (Median),test/Spearman's Rank Correlation (Average),test/F1,test/rssd_absolute,test/mean_rssd,test/sum_rssd,num_cells,checkpoint_path,save_idx
+999,0.2713130819878675,0.48395478425750943,0.39324895969181145,0.2713130819878675,20.024328491058537,3.798832515493639,83.57431534086005,3851,/nfs/team361/mv11/outputs/2025-08-22/11-06-41-MERFISH_mouse_cortex/checkpoints/epoch=999.ckpt,mouse2_slice280_0
