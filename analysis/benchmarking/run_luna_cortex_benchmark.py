@@ -6,7 +6,8 @@ metrics as scgg, so the two methods can be compared head-to-head.
 Pipeline (all I/O paths configurable via CLI):
 
   1.  Discover Mouse-1 / Mouse-2 silver h5ad files (LUNA cortex naming
-      convention: merfish_mouse_cortex_mouse{1,2}_slice{N}.h5ad).
+      convention: mmc_mouse{1,2}_slice{N}.h5ad, or the legacy
+      merfish_mouse_cortex_mouse{1,2}_slice{N}.h5ad).
   2.  Write LUNA-format CSVs into a work directory — gene columns first,
       then cell_section / cell_class / coord_X / coord_Y.
   3.  Subprocess into the LUNA conda/uv venv and invoke LUNA's main.py
@@ -34,7 +35,7 @@ or torch builds.
 
 Usage:
     python scgg-reproducibility/analysis/benchmarking/run_luna_cortex_benchmark.py \\
-        --silver_dir /nfs/team361/sb75/DATASETS/silver/merfish_mouse_cortex_luna \\
+        --silver_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\
         --output_dir ./results/luna_baseline_v1 \\
         --luna_venv /nfs/team361/sb75/.venvs/luna \\
         --luna_repo /nfs/team361/sb75/code/LUNA
@@ -67,7 +68,7 @@ logger = logging.getLogger("luna_benchmark")
 
 
 _SLICE_RE = re.compile(
-    r"^merfish_mouse_cortex_mouse(?P<mouse>\d+)_slice(?P<slice>\d+)\.h5ad$"
+    r"^(?:mmc|merfish_mouse_cortex)_mouse(?P<mouse>\d+)_slice(?P<slice>\d+)\.h5ad$"
 )
 
 

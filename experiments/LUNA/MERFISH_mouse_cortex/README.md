@@ -11,8 +11,10 @@ bioRxiv 10.1101/2025.02.13.638045, **Figure 3**) using the ScGG model.
   - **Train** — Mouse 1, **33 slices**, **158,379 cells**.
   - **Test**  — Mouse 2, **31 slices**, **118,036 cells**.
 - **Local path on the cluster (sb75 area):**
-  - `/nfs/team361/sb75/DATASETS/silver/merfish_mouse_cortex_luna/` — 64 per-slice
-    h5ad files named `merfish_mouse_cortex_mouse{1,2}_slice{N}.h5ad`.
+  - `/nfs/team361/sb75/DATASETS/silver/mmc_luna/` — 64 per-slice h5ad files
+    named `mmc_mouse{1,2}_slice{N}.h5ad` (the legacy
+    `merfish_mouse_cortex_mouse{1,2}_slice{N}.h5ad` naming is also still
+    recognised by the loader).
 - The loader (`scgg.data.luna_cortex.load_luna_cortex`) auto-discovers
   Mouse 1 → TRAIN and Mouse 2 → TEST from the filename pattern, so the split
   does not need to be defined explicitly anywhere.
@@ -42,12 +44,18 @@ cd /path/to/scgg_claude_project/scgg
 pip install -e .
 
 python scripts/run_luna_cortex_benchmark.py \
-    --data_dir /nfs/team361/sb75/DATASETS/silver/merfish_mouse_cortex_luna \
-    --output_dir ./results/luna_cortex_run1 \
+    --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \
     --epochs 200 \
     --batch_size 8192 \
     --wandb_run_name luna_cortex_v1
 ```
+
+`--output_dir` defaults to
+`/nfs/team361/sb75/scgg-reproducibility/artifacts/<data_dir_name>/model/<YYYYMMDD_HHMMSS>/`
+(i.e. `.../mmc_luna/model/20260518_213045/`). Each training run gets its
+own timestamped directory; inference outputs land under the matching
+`.../inference/<YYYYMMDD_HHMMSS>/` so plots stay pinned to the model
+that produced them. Pass `--output_dir` explicitly to override.
 
 From a notebook (see `notebooks/scgg_luna_cortex_benchmark.ipynb`):
 
@@ -55,14 +63,14 @@ From a notebook (see `notebooks/scgg_luna_cortex_benchmark.ipynb`):
 from scripts.run_luna_cortex_benchmark import run_benchmark
 
 agg = run_benchmark(
-    data_dir="/nfs/team361/sb75/DATASETS/silver/merfish_mouse_cortex_luna",
-    output_dir="./results/luna_cortex_run1",
+    data_dir="/nfs/team361/sb75/DATASETS/silver/mmc_luna",
     epochs=200,
     batch_size=8192,
 )
 ```
 
-Outputs land in `output_dir`:
+Outputs land in `output_dir` (default
+`/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/model/<YYYYMMDD_HHMMSS>/`):
 
 - `per_slice_metrics.csv` — one row per test slice (31 rows).
 - `aggregate_metrics.json` — the LUNA-style aggregated numbers (mean of
