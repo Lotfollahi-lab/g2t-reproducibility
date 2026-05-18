@@ -120,11 +120,23 @@ log "installing PyG extensions from ${PYG_WHL_URL}..."
     -f "${PYG_WHL_URL}"
 
 # 3c. The rest. torch_geometric pulls itself in.
-log "installing torch_geometric, lightning, scanpy, hydra, et al..."
+#
+# pytorch_lightning is pinned to <2.5 because LUNA's DataModule does NOT
+# inherit from pl.LightningDataModule directly. PL >=2.5 introduced a
+# stricter check in `is_overridden` that raises `ValueError: Expected a
+# parent` when the datamodule isn't a proper subclass. The 2.0–2.4 range
+# uses a more permissive check that LUNA's code path works against.
+#
+# We deliberately do NOT install the `lightning` meta-package — it pins
+# the unified Lightning ecosystem to the latest, which would yank
+# pytorch_lightning back to 2.5+ via transitive deps. Pin
+# torchmetrics too since some 1.x ↔ 2.x compatibility breaks Lightning's
+# logging when versions drift.
+log "installing torch_geometric, pytorch_lightning, scanpy, hydra, et al..."
 "${UV_PIP[@]}" \
     torch_geometric \
-    lightning \
-    "pytorch_lightning>=2.0,<3.0" \
+    "pytorch_lightning>=2.0,<2.5" \
+    "torchmetrics>=1.0,<1.5" \
     scanpy \
     wandb \
     colorcet \
@@ -143,6 +155,28 @@ log "installing scipy>=1.11,<1.14 (1.9.1 has no Py3.10 wheels)..."
 # 3e. Bridge utilities we use from the scgg-side LUNA wrapper scripts.
 log "installing pandas / anndata / h5py / matplotlib..."
 "${UV_PIP[@]}" pandas anndata h5py matplotlib
+
+# 3f. Uninstall the `lightning` meta-package if any transitive dep dragged
+#     it in (scanpy / squidpy / torch_geometric all sometimes do). Why:
+#     torch_geometric's LightningDataset has a try/except import:
+#         try: from lightning.pytorch import LightningDataModule  # if `lightning` is present
+#         except ImportError: from pytorch_lightning import LightningDataModule
+#     If `lightning` is installed, the FIRST branch runs and LUNA's
+#     DataModule ends up inheriting from `lightning.pytorch.LightningDataModule`.
+#     But LUNA's Trainer uses `pytorch_lightning.Trainer`, which checks
+#     `isinstance(instance, pytorch_lightning.LightningDataModule)`. These
+#     are two distinct classes in different namespaces — the isinstance
+#     check returns False and `is_overridden` raises:
+#         ValueError: Expected a parent
+#     Removing `lightning` forces the except branch in torch_geometric, so
+#     everyone agrees on the same `pytorch_lightning.LightningDataModule`.
+log "removing 'lightning' meta-package if present (forces "
+log "  torch_geometric's LightningDataset to use pytorch_lightning's base)..."
+uv pip uninstall --python "$VENV_DIR/bin/python" lightning 2>/dev/null || true
+uv pip uninstall --python "$VENV_DIR/bin/python" lightning-fabric 2>/dev/null || true
+uv pip uninstall --python "$VENV_DIR/bin/python" lightning-utilities 2>/dev/null || true
+# Reinstall lightning-utilities — pytorch_lightning needs it directly.
+"${UV_PIP[@]}" "lightning-utilities>=0.10"
 
 # ---------------------------------------------------------------------------
 # 4. Smoke check: import everything LUNA needs and confirm CUDA works
@@ -177,11 +211,39 @@ else:
 
 import torchvision; print("torchvision:", torchvision.__version__)
 import torch_geometric; print("pyg       :", torch_geometric.__version__)
-import lightning; print("lightning :", lightning.__version__)
+import pytorch_lightning as pl; print("pl        :", pl.__version__)
+import torchmetrics; print("torchmetrics:", torchmetrics.__version__)
 import scanpy; print("scanpy    :", scanpy.__version__)
 import hydra; print("hydra     :", hydra.__version__)
 import scipy; print("scipy     :", scipy.__version__)
 import linear_attention_transformer; print("linear_attn: OK")
+
+# The actual root-cause check for the "Expected a parent" error LUNA hit:
+# torch_geometric's LightningDataset must inherit from THIS env's
+# `pytorch_lightning.LightningDataModule`, not from the `lightning`
+# meta-package's version. If both packages are installed, torch_geometric
+# picks `lightning.pytorch.LightningDataModule`, and LUNA's Trainer (which
+# uses `pytorch_lightning.Trainer`) hits an isinstance mismatch.
+from torch_geometric.data.lightning import LightningDataset as _PyGLightningDS
+from pytorch_lightning import LightningDataModule as _PLLDM
+mro_modules = [c.__module__ + "." + c.__name__ for c in _PyGLightningDS.__mro__]
+print("pyg.LightningDataset MRO[:4]:")
+for m in mro_modules[:4]:
+    print(f"    {m}")
+if any("lightning.pytorch" in m for m in mro_modules):
+    print("ERROR: torch_geometric.LightningDataset inherits from "
+          "`lightning.pytorch.LightningDataModule`, but LUNA's Trainer "
+          "uses `pytorch_lightning.LightningDataModule`. Mismatch will "
+          "cause `ValueError: Expected a parent` at trainer.fit() time.")
+    print("  Fix: remove the `lightning` meta-package from this venv.")
+    raise SystemExit(1)
+if _PLLDM not in _PyGLightningDS.__mro__:
+    print("ERROR: torch_geometric.LightningDataset does not inherit from "
+          "pytorch_lightning.LightningDataModule at all. is_overridden "
+          "will fail.")
+    raise SystemExit(1)
+print("namespace check: OK — pyg & pytorch_lightning agree on the same "
+      "LightningDataModule class")
 PY
 
 log ""
