@@ -146,11 +146,21 @@ log "installing torch_geometric, pytorch_lightning, scanpy, hydra, et al..."
     linear_attention_transformer
 
 # 3d. scipy. LUNA's README requested 1.9.1 for an RSSD-metric quirk, but
-#     1.9.1 has no Python 3.10 wheels. 1.11.x is the latest with broad
-#     wheel coverage that still works with LUNA's training pipeline; the
-#     RSSD numbers may differ slightly from LUNA's published table.
-log "installing scipy>=1.11,<1.14 (1.9.1 has no Py3.10 wheels)..."
-"${UV_PIP[@]}" "scipy>=1.11,<1.14"
+#     1.9.1 has no Python 3.10 wheels. scipy 1.10.x is the sweet spot:
+#       * has Py3.10 wheels (1.9.1 doesn't)
+#       * still has the permissive `scipy.spatial.transform.Rotation
+#         .align_vectors(a, b, return_sensitivity=True)` API that LUNA's
+#         `metrics/evaluation_statistics.compute_kabsch_rotation` uses.
+#     scipy 1.11+ added a stricter check that raises
+#         ValueError: Cannot return sensitivity matrix with an infinite
+#         weight or one vector pair
+#     when a per-cell-class alignment has only one vector (which happens
+#     during LUNA's per-class RSSD on test slices that contain a rare
+#     class with a single cell). Pinning to <1.11 keeps the original
+#     LUNA-1.9.1 behaviour.
+log "installing scipy>=1.10,<1.11 (>=1.10 for Py3.10 wheels, <1.11 to "
+log "  avoid the align_vectors 'one vector pair' regression LUNA hits)..."
+"${UV_PIP[@]}" "scipy>=1.10,<1.11"
 
 # 3e. Bridge utilities we use from the scgg-side LUNA wrapper scripts.
 log "installing pandas / anndata / h5py / matplotlib..."
@@ -244,6 +254,25 @@ if _PLLDM not in _PyGLightningDS.__mro__:
     raise SystemExit(1)
 print("namespace check: OK — pyg & pytorch_lightning agree on the same "
       "LightningDataModule class")
+
+# scipy Rotation.align_vectors API check. LUNA's test phase computes
+# per-cell-class Kabsch alignments, which fail when a rare class has
+# only one cell. scipy 1.11+ raises:
+#   ValueError: Cannot return sensitivity matrix with an infinite weight
+#   or one vector pair
+# We pinned scipy<1.11 to dodge this, but verify the call actually works.
+from scipy.spatial.transform import Rotation
+import numpy as np
+try:
+    a = np.array([[1.0, 0.0, 0.0]])  # ONE vector pair (the failure case)
+    b = np.array([[0.0, 1.0, 0.0]])
+    _, _, _ = Rotation.align_vectors(a, b, return_sensitivity=True)
+    print("scipy Rotation.align_vectors(1 pair, sensitivity=True): OK")
+except ValueError as e:
+    print(f"scipy Rotation.align_vectors(1 pair): FAILED ({e})")
+    print("  LUNA's per-class RSSD computation will crash on test slices "
+          "containing a rare class with a single cell. Pin scipy < 1.11.")
+    raise SystemExit(1)
 PY
 
 log ""
