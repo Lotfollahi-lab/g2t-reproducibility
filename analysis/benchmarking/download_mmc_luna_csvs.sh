@@ -53,10 +53,10 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 log ""
 log "downloading file id ${FILE_ID}..."
 log "  https://drive.google.com/file/d/${FILE_ID}/view"
-# `--id` is the safest invocation for a `/file/d/<ID>/view` URL because it
-# bypasses the gdown URL parser and goes straight to the large-file
-# confirm interstitial.
-( cd "$STAGE_DIR" && gdown --id "${FILE_ID}" )
+# gdown 6.x dropped the `--id` flag in favour of a positional argument.
+# The `uc?id=…` URL form works in BOTH old (5.x) and new (6.x) versions,
+# so we use it for portability.
+( cd "$STAGE_DIR" && gdown "https://drive.google.com/uc?id=${FILE_ID}" )
 
 # What actually landed?
 DOWNLOADED=( "$STAGE_DIR"/* )

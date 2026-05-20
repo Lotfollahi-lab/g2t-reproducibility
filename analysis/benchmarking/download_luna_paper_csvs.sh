@@ -61,7 +61,8 @@ SAMPLE_DEST="$DEST_DIR/MERFISH_mouse_cortex_sample.zip"
 if [[ -f "$SAMPLE_DEST" ]]; then
     log "  sample already present at $SAMPLE_DEST; skipping"
 else
-    gdown --id "${SAMPLE_CORTEX_FILE_ID}" -O "$SAMPLE_DEST" || \
+    # gdown 6.x dropped `--id`; the uc?id=… URL form works in both 5.x and 6.x.
+    gdown "https://drive.google.com/uc?id=${SAMPLE_CORTEX_FILE_ID}" -O "$SAMPLE_DEST" || \
         log "WARNING: sample-file download failed."
 fi
 
