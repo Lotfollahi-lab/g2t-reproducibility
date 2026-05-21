@@ -65,6 +65,98 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Pre-flight: every package listed in pyproject must exist on disk.
+# pyproject's `[tool.setuptools] packages = [...]` enumerates every
+# package by name. If any of the named dirs is missing, setuptools
+# bails halfway through `egg_info` with
+#   error: package directory 'src/utils/data' does not exist
+# which is the exact symptom we just hit. Catch it here with a
+# clearer message AND auto-repair from the external LUNA checkout
+# when it's available — saves the user a manual cp step.
+# ---------------------------------------------------------------------------
+REQUIRED_DIRS=(
+    models
+    metrics
+    datasets
+    configs
+    configs/experiment configs/general configs/model
+    configs/test configs/train configs/validation
+    utils
+    utils/data
+    utils/diffusion_model
+    utils/diffusion_model/diffusion
+    utils/diffusion_model/sample
+    utils/diffusion_model/setup
+    utils/diffusion_model/test
+    utils/diffusion_model/train
+    utils/diffusion_model/validation
+)
+REQUIRED_FILES=(main.py diffusion_model.py)
+
+# Where to repair from. The external LUNA checkout used by the
+# baseline scripts is the canonical source; the LUNA git URL is the
+# fallback if the user doesn't have it locally.
+LUNA_SRC_FOR_REPAIR="${LUNA_SRC_FOR_REPAIR:-/nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/luna}"
+
+missing=()
+for d in "${REQUIRED_DIRS[@]}"; do
+    [[ -d "$SCGG_CODE_DIR/src/$d" ]] || missing+=("dir:$d")
+done
+for f in "${REQUIRED_FILES[@]}"; do
+    [[ -f "$SCGG_CODE_DIR/src/$f" ]] || missing+=("file:$f")
+done
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    log "scgg/src/ is missing ${#missing[@]} LUNA-vendored entries:"
+    for m in "${missing[@]}"; do
+        log "    $m"
+    done
+    if [[ -d "$LUNA_SRC_FOR_REPAIR" ]]; then
+        log "auto-repairing from $LUNA_SRC_FOR_REPAIR..."
+        for m in "${missing[@]}"; do
+            kind="${m%%:*}"; path="${m#*:}"
+            src="$LUNA_SRC_FOR_REPAIR/$path"
+            dst="$SCGG_CODE_DIR/src/$path"
+            if [[ "$kind" == "dir" && -d "$src" ]]; then
+                mkdir -p "$(dirname "$dst")"
+                cp -r "$src" "$dst"
+                log "    restored dir  $path"
+            elif [[ "$kind" == "file" && -f "$src" ]]; then
+                cp "$src" "$dst"
+                log "    restored file $path"
+            else
+                log "    SKIP (missing in LUNA source too): $path"
+            fi
+        done
+    else
+        cat >&2 <<EOF
+ERROR: the LUNA fallback source dir does not exist either:
+    $LUNA_SRC_FOR_REPAIR
+
+Set LUNA_SRC_FOR_REPAIR=/path/to/LUNA and re-run this script, OR copy
+the missing entries listed above into $SCGG_CODE_DIR/src/ manually.
+EOF
+        exit 1
+    fi
+
+    # Final check after repair attempt.
+    still=()
+    for d in "${REQUIRED_DIRS[@]}"; do
+        [[ -d "$SCGG_CODE_DIR/src/$d" ]] || still+=("dir:$d")
+    done
+    for f in "${REQUIRED_FILES[@]}"; do
+        [[ -f "$SCGG_CODE_DIR/src/$f" ]] || still+=("file:$f")
+    done
+    if [[ ${#still[@]} -gt 0 ]]; then
+        cat >&2 <<EOF
+ERROR: still missing after repair attempt:
+$(printf '    %s\n' "${still[@]}")
+EOF
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 1. Create / refresh the uv venv with the pinned Python
 # ---------------------------------------------------------------------------
 if [[ -d "$VENV_DIR" ]]; then
