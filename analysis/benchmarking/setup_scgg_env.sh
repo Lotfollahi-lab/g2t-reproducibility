@@ -159,15 +159,61 @@ uv pip uninstall --python "$VENV_DIR/bin/python" lightning-utilities 2>/dev/null
 # letting pip re-resolve from scgg's pyproject would override our pins
 # (e.g. yank pytorch_lightning back to >=2.5 via transitive resolution).
 #
-# Nuke any stale egg-info first: a previous install can cache a package
-# list that doesn't include packages added since (or, worse, includes
-# packages we've removed). On the next install setuptools rebuilds it
-# from scratch using the current pyproject.
-log "removing stale egg-info under $SCGG_CODE_DIR/src/ (if any)..."
+# Nuke any stale egg-info AND any prior editable-install metadata
+# before installing. A previous install can cache a package list that
+# doesn't include packages added since (or, worse, includes packages
+# we've removed). The next install regenerates everything from the
+# current pyproject.
+log "removing stale egg-info under $SCGG_CODE_DIR/ (if any)..."
 rm -rf "$SCGG_CODE_DIR"/src/*.egg-info "$SCGG_CODE_DIR"/*.egg-info 2>/dev/null || true
+log "removing prior editable-install metadata from $VENV_DIR/lib/...site-packages/ (if any)..."
+find "$VENV_DIR/lib" -maxdepth 4 -name "__editable__.scgg*.pth" -delete 2>/dev/null || true
+find "$VENV_DIR/lib" -maxdepth 4 -name "scgg-*.dist-info" -type d -exec rm -rf {} + 2>/dev/null || true
+find "$VENV_DIR/lib" -maxdepth 4 -name "scgg.egg-link" -delete 2>/dev/null || true
+# Also clear uv's build cache for this project — uv can otherwise reuse
+# a previously-built wheel that was built against an older pyproject.
+uv cache clean scgg 2>/dev/null || true
 
 log "installing scgg (editable) from $SCGG_CODE_DIR..."
-uv pip install --python "$VENV_DIR/bin/python" --no-deps -e "$SCGG_CODE_DIR"
+uv pip install --python "$VENV_DIR/bin/python" --no-deps --reinstall -e "$SCGG_CODE_DIR"
+
+# Sanity check: every LUNA submodule must be importable. The previous
+# bug was `utils.diffusion_model.setup.setup` resolving while
+# `utils.data` did not — strict-editable installs that miss namespace
+# packages produce exactly that asymmetric failure. Test BOTH paths
+# here so we catch it now instead of in the middle of the big smoke
+# check below.
+log "verifying every LUNA submodule resolves..."
+"$VENV_DIR/bin/python" -c "
+import sys
+checks = [
+    'main', 'diffusion_model',
+    'scgg', 'scgg.data', 'scgg.evaluation',
+    'models',
+    'metrics',
+    'datasets', 'datasets.data_module',
+    'utils', 'utils.data', 'utils.data.abstract_datatype',
+    'utils.diffusion_model',
+    'utils.diffusion_model.diffusion', 'utils.diffusion_model.diffusion.noise_model',
+    'utils.diffusion_model.sample', 'utils.diffusion_model.sample.sample',
+    'utils.diffusion_model.setup', 'utils.diffusion_model.setup.setup',
+    'utils.diffusion_model.train', 'utils.diffusion_model.train.train',
+    'utils.diffusion_model.validation', 'utils.diffusion_model.validation.val',
+    'configs',
+]
+bad = []
+for name in checks:
+    try:
+        __import__(name)
+    except ModuleNotFoundError as e:
+        bad.append((name, str(e)))
+if bad:
+    print('FAILED to import:', file=sys.stderr)
+    for n, msg in bad:
+        print(f'  {n}: {msg}', file=sys.stderr)
+    sys.exit(1)
+print('all', len(checks), 'modules importable')
+"
 
 # ---------------------------------------------------------------------------
 # 4. Smoke check: import everything scgg needs and confirm CUDA works
