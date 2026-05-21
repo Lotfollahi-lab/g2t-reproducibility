@@ -158,6 +158,14 @@ uv pip uninstall --python "$VENV_DIR/bin/python" lightning-utilities 2>/dev/null
 # We install with --no-deps because every dep is already pinned above —
 # letting pip re-resolve from scgg's pyproject would override our pins
 # (e.g. yank pytorch_lightning back to >=2.5 via transitive resolution).
+#
+# Nuke any stale egg-info first: a previous install can cache a package
+# list that doesn't include packages added since (or, worse, includes
+# packages we've removed). On the next install setuptools rebuilds it
+# from scratch using the current pyproject.
+log "removing stale egg-info under $SCGG_CODE_DIR/src/ (if any)..."
+rm -rf "$SCGG_CODE_DIR"/src/*.egg-info "$SCGG_CODE_DIR"/*.egg-info 2>/dev/null || true
+
 log "installing scgg (editable) from $SCGG_CODE_DIR..."
 uv pip install --python "$VENV_DIR/bin/python" --no-deps -e "$SCGG_CODE_DIR"
 
