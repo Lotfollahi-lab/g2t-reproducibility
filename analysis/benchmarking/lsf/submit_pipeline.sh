@@ -45,9 +45,9 @@
 #                         (scgg only).
 #
 # LSF resources (sensible defaults baked in; override per submission):
-#   --queue / -q Q        LSF queue. Default: gpu-normal for scgg/luna,
-#                         normal for novosparc. Override via $LSF_QUEUE
-#                         env var too.
+#   --queue / -q Q        LSF queue. Default: training-parallel for all
+#                         three methods. Override via $LSF_QUEUE env
+#                         var too.
 #   --group / -g G        LSF cost-code group. Default: \$LSF_GROUP or
 #                         the value baked in below.
 #   --mem MB              memory cap in MB (rusage + select). Defaults
@@ -67,11 +67,11 @@
 #
 # Per-method default resources (each can be overridden via --mem etc):
 #
-#   method      queue           mem    cores  wall   gpu
-#   ---------- --------------- ------ ------ ------ -----
-#   scgg        gpu-normal     128000   24   24:00  1
-#   luna        gpu-normal     128000   24   24:00  1
-#   novosparc   normal          64000    8   04:00  none
+#   method      queue              mem    cores  wall   gpu
+#   ---------- ------------------ ------ ------ ------ -----
+#   scgg        training-parallel  128000   24   24:00  1
+#   luna        training-parallel  128000   24   24:00  1
+#   novosparc   training-parallel   64000    8   04:00  none
 #
 # Examples:
 #   # scgg with anisotropic gating on top of new defaults
@@ -157,8 +157,8 @@ LSF_GROUP_DEFAULT="${LSF_GROUP:-s10396}"
 
 # Per-method default resources. The submitter picks one row based on
 # --method, but each cell is overridable via the matching --flag.
-DEFAULT_QUEUE_GPU="${LSF_QUEUE:-gpu-normal}"
-DEFAULT_QUEUE_CPU="${LSF_QUEUE:-normal}"
+DEFAULT_QUEUE_GPU="${LSF_QUEUE:-training-parallel}"
+DEFAULT_QUEUE_CPU="${LSF_QUEUE:-training-parallel}"
 
 # --- Help -----------------------------------------------------------------
 print_help() {
