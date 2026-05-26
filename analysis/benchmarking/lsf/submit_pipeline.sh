@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+# submit_pipeline.sh
+# -----------------------------------------------------------------------------
+# Submit a SINGLE LSF job that runs one of scgg's three benchmarking
+# pipelines (scgg / luna / novosparc) end to end. Wraps:
+#
+#   scripts/run_scgg_pipeline.py
+#   scripts/run_luna_pipeline.py
+#   scripts/run_novosparc_pipeline.py
+#
+# under a single bsub command so a one-off ablation is one line.
+#
+# Usage:
+#   bash submit_pipeline.sh --method <scgg|luna|novosparc> \
+#                           --wandb_run_name <NAME> \
+#                           [OPTIONS]
+#
+# Required:
+#   --method M            scgg | luna | novosparc.
+#   --wandb_run_name N    The wandb run name (also threaded into output
+#                         dirs and used for the LSF job name).
+#
+# Data source (one is required):
+#   --data_dir DIR        Silver h5ad directory (the usual silver path).
+#   --train_csv FILE      Pre-built LUNA-format train CSV (pair w/ --test_csv).
+#   --test_csv  FILE      Pre-built LUNA-format test CSV.
+#
+# Pipeline knobs (all optional; defaults inherited from the python
+# pipeline scripts):
+#   --epochs N            train.n_epochs override. Default: pipeline's
+#                         own default (1000). Ignored for novosparc.
+#   --seed S              general.seed override. Default: 0.
+#   --n_inference_samples N  multi-sample inference budget. Ignored for
+#                         luna (single-sample DDPM only).
+#   --override "STR"      Single quoted string of space-separated
+#                         key=value tokens for the training-time
+#                         pipeline ``--override``. Example:
+#                           --override "model.edm.embed_dim=16 train.lr=1e-4"
+#                         Repeat the flag to append more tokens.
+#   --inference_override "STR"  same, for inference-only overrides.
+#                         Ignored for novosparc (single-process).
+#   --wandb_project P     Optional wandb project override.
+#   --wandb_mode M        disabled|online|offline|dryrun. Default: online.
+#   --embedding_field F   adata.obsm key for pretrained gene embeddings
+#                         (scgg only).
+#
+# LSF resources (sensible defaults baked in; override per submission):
+#   --queue / -q Q        LSF queue. Default: gpu-normal for scgg/luna,
+#                         normal for novosparc. Override via $LSF_QUEUE
+#                         env var too.
+#   --group / -g G        LSF cost-code group. Default: \$LSF_GROUP or
+#                         the value baked in below.
+#   --mem MB              memory cap in MB (rusage + select). Defaults
+#                         per-method: 128000 for scgg/luna, 64000 for
+#                         novosparc.
+#   --cores N             cores. Defaults: 24 for scgg/luna, 8 for novosparc.
+#   --wall HH:MM          wall-clock cap. Defaults: 24:00 for scgg/luna
+#                         (full 1000-epoch training fits), 04:00 for
+#                         novosparc (CPU-only OT solve per slice).
+#   --gpu STR             -gpu argument. Default for scgg/luna:
+#                         mode=exclusive_process:num=1:block=yes.
+#                         novosparc defaults to no GPU.
+#
+# Misc:
+#   --dry_run             Print the bsub command WITHOUT submitting.
+#   --help / -h           Print this usage block.
+#
+# Per-method default resources (each can be overridden via --mem etc):
+#
+#   method      queue           mem    cores  wall   gpu
+#   ---------- --------------- ------ ------ ------ -----
+#   scgg        gpu-normal     128000   24   24:00  1
+#   luna        gpu-normal     128000   24   24:00  1
+#   novosparc   normal          64000    8   04:00  none
+#
+# Examples:
+#   # scgg with anisotropic gating on top of new defaults
+#   bash submit_pipeline.sh \\
+#       --method scgg \\
+#       --wandb_run_name scgg_mmc_new_aniso \\
+#       --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\
+#       --n_inference_samples 10 \\
+#       --override "model.edm.anisotropic_gating=true"
+#
+#   # scgg with shape-matching loss + DiT backbone
+#   bash submit_pipeline.sh \\
+#       --method scgg \\
+#       --wandb_run_name scgg_mmc_new_shape_dit \\
+#       --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\
+#       --n_inference_samples 10 \\
+#       --override "model.loss.shape_matching.enabled=true \\
+#                   model.loss.shape_matching.weight=0.1 \\
+#                   model.backbone=dit"
+#
+#   # LUNA baseline
+#   bash submit_pipeline.sh \\
+#       --method luna \\
+#       --wandb_run_name luna_mmc_baseline \\
+#       --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna
+#
+#   # novosparc baseline (lighter resources, no GPU)
+#   bash submit_pipeline.sh \\
+#       --method novosparc \\
+#       --wandb_run_name novosparc_mmc_baseline \\
+#       --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna
+#
+#   # Dry-run to inspect the bsub command:
+#   bash submit_pipeline.sh --method scgg --wandb_run_name foo \\
+#       --data_dir /nfs/... --dry_run
+#
+#   # Multi-seed sweep (run 5 jobs):
+#   for s in 0 1 2 3 4; do
+#     bash submit_pipeline.sh \\
+#         --method scgg \\
+#         --wandb_run_name scgg_mmc_new_baseline_seed${s} \\
+#         --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\
+#         --seed $s \\
+#         --n_inference_samples 10
+#   done
+#
+# Outputs:
+#   All run artifacts (checkpoints, plots, metrics, runtime.csv,
+#   compute_requirements.csv) AND the LSF stdout/err for this job
+#   land under the per-run dir:
+#
+#       <ARTIFACTS_ROOT>/<dataset>/<method>_model/<TS>/
+#           best_model.ckpt
+#           runtime.csv
+#           compute_requirements.csv
+#           per_slice_metrics.csv
+#           aggregate_metrics.json
+#           metrics.csv
+#           plots/  (training-side, if --train_plots)
+#           lsf_logs/
+#               submit.out
+#               submit.err
+#
+#       <ARTIFACTS_ROOT>/<dataset>/<method>_inference/<TS>/
+#           runtime.csv
+#           compute_requirements.csv
+#           per_slice_metrics.csv
+#           aggregate_metrics.json
+#           metrics.csv
+#           plots/
+#           <section>/metadata_pred.csv
+#
+#   Both subtrees share the same <TS> so a training run and its
+#   inference pair up by eye. For novosparc (no training subprocess),
+#   everything including LSF logs lands under
+#   <ARTIFACTS_ROOT>/<dataset>/novosparc_inference/<TS>/.
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+# --- Defaults shared across methods ---------------------------------------
+LSF_GROUP_DEFAULT="${LSF_GROUP:-s10396}"
+
+# Per-method default resources. The submitter picks one row based on
+# --method, but each cell is overridable via the matching --flag.
+DEFAULT_QUEUE_GPU="${LSF_QUEUE:-gpu-normal}"
+DEFAULT_QUEUE_CPU="${LSF_QUEUE:-normal}"
+
+# --- Help -----------------------------------------------------------------
+print_help() {
+    # Print the docstring (top comment block) up to the first non-comment line.
+    awk 'NR>1 && /^[^#]/{exit} {print}' "$0"
+}
+
+# --- Parse args -----------------------------------------------------------
+METHOD=""
+RUN_NAME=""
+DATA_DIR=""
+TRAIN_CSV=""
+TEST_CSV=""
+EPOCHS=""
+SEED=""
+N_SAMPLES=""
+OVERRIDE_STRING=""
+INFERENCE_OVERRIDE_STRING=""
+WANDB_PROJECT=""
+WANDB_MODE=""
+EMBEDDING_FIELD=""
+
+QUEUE_ARG=""
+GROUP_ARG="$LSF_GROUP_DEFAULT"
+MEM_ARG=""
+CORES_ARG=""
+WALL_ARG=""
+GPU_ARG=""
+DRY_RUN_ARG="${DRY_RUN:-0}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --method)
+            METHOD="${2:?--method requires a value}"; shift 2 ;;
+        --wandb_run_name|--run_name)
+            RUN_NAME="${2:?--wandb_run_name requires a value}"; shift 2 ;;
+        --data_dir)
+            DATA_DIR="${2:?--data_dir requires a value}"; shift 2 ;;
+        --train_csv)
+            TRAIN_CSV="${2:?--train_csv requires a value}"; shift 2 ;;
+        --test_csv)
+            TEST_CSV="${2:?--test_csv requires a value}"; shift 2 ;;
+        --epochs)
+            EPOCHS="${2:?--epochs requires a value}"; shift 2 ;;
+        --seed)
+            SEED="${2:?--seed requires a value}"; shift 2 ;;
+        --n_inference_samples)
+            N_SAMPLES="${2:?--n_inference_samples requires a value}"; shift 2 ;;
+        --override)
+            # Allow repeated --override; concatenate with a space so they
+            # all end up in the single space-separated env var the runner
+            # word-splits on.
+            if [[ -z "$OVERRIDE_STRING" ]]; then
+                OVERRIDE_STRING="${2:?--override requires a value}"
+            else
+                OVERRIDE_STRING="$OVERRIDE_STRING ${2:?--override requires a value}"
+            fi
+            shift 2 ;;
+        --inference_override)
+            if [[ -z "$INFERENCE_OVERRIDE_STRING" ]]; then
+                INFERENCE_OVERRIDE_STRING="${2:?--inference_override requires a value}"
+            else
+                INFERENCE_OVERRIDE_STRING="$INFERENCE_OVERRIDE_STRING ${2:?--inference_override requires a value}"
+            fi
+            shift 2 ;;
+        --wandb_project)
+            WANDB_PROJECT="${2:?--wandb_project requires a value}"; shift 2 ;;
+        --wandb_mode)
+            WANDB_MODE="${2:?--wandb_mode requires a value}"; shift 2 ;;
+        --embedding_field)
+            EMBEDDING_FIELD="${2:?--embedding_field requires a value}"; shift 2 ;;
+        --queue|-q)
+            QUEUE_ARG="${2:?--queue requires a value}"; shift 2 ;;
+        --group|-g)
+            GROUP_ARG="${2:?--group requires a value}"; shift 2 ;;
+        --mem)
+            MEM_ARG="${2:?--mem requires a value}"; shift 2 ;;
+        --cores)
+            CORES_ARG="${2:?--cores requires a value}"; shift 2 ;;
+        --wall)
+            WALL_ARG="${2:?--wall requires a value}"; shift 2 ;;
+        --gpu)
+            GPU_ARG="${2:?--gpu requires a value}"; shift 2 ;;
+        --dry_run)
+            DRY_RUN_ARG=1; shift ;;
+        --help|-h)
+            print_help; exit 0 ;;
+        *)
+            echo "ERROR: unrecognised arg '$1'." >&2
+            echo "Run with --help for usage." >&2
+            exit 2 ;;
+    esac
+done
+
+# --- Validate -------------------------------------------------------------
+if [[ -z "$METHOD" ]]; then
+    echo "ERROR: --method is required." >&2; print_help; exit 2
+fi
+case "$METHOD" in
+    scgg|luna|novosparc) ;;
+    *) echo "ERROR: --method must be scgg|luna|novosparc; got '$METHOD'." >&2; exit 2 ;;
+esac
+if [[ -z "$RUN_NAME" ]]; then
+    echo "ERROR: --wandb_run_name is required." >&2; exit 2
+fi
+
+# Data-source validation (matches the python pipelines' own rule):
+# exactly one of (--data_dir) or (--train_csv + --test_csv).
+if [[ -z "$DATA_DIR" ]] && [[ -z "$TRAIN_CSV" && -z "$TEST_CSV" ]]; then
+    echo "ERROR: must pass either --data_dir, or both --train_csv and --test_csv." >&2
+    exit 2
+fi
+if [[ -n "$DATA_DIR" ]] && [[ -n "$TRAIN_CSV" || -n "$TEST_CSV" ]]; then
+    echo "ERROR: --data_dir is mutually exclusive with --train_csv / --test_csv." >&2
+    exit 2
+fi
+if [[ -n "$TRAIN_CSV" && -z "$TEST_CSV" ]] || [[ -z "$TRAIN_CSV" && -n "$TEST_CSV" ]]; then
+    echo "ERROR: --train_csv and --test_csv must be passed together." >&2
+    exit 2
+fi
+if [[ "$METHOD" == "novosparc" ]] && [[ -z "$DATA_DIR" ]]; then
+    echo "ERROR: novosparc pipeline only supports --data_dir (silver h5ad input)." >&2
+    exit 2
+fi
+
+# --- Per-method defaults --------------------------------------------------
+SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+# Default venv paths follow the setup_*_env.sh convention.
+case "$METHOD" in
+    scgg)
+        DEFAULT_VENV="/nfs/team361/sb75/.venvs/scgg"
+        DEFAULT_QUEUE="$DEFAULT_QUEUE_GPU"
+        DEFAULT_MEM=128000
+        DEFAULT_CORES=24
+        DEFAULT_WALL="24:00"
+        DEFAULT_GPU="mode=exclusive_process:num=1:block=yes"
+        ;;
+    luna)
+        DEFAULT_VENV="/nfs/team361/sb75/.venvs/luna"
+        DEFAULT_QUEUE="$DEFAULT_QUEUE_GPU"
+        DEFAULT_MEM=128000
+        DEFAULT_CORES=24
+        DEFAULT_WALL="24:00"
+        DEFAULT_GPU="mode=exclusive_process:num=1:block=yes"
+        ;;
+    novosparc)
+        DEFAULT_VENV="/nfs/team361/sb75/.venvs/novosparc"
+        DEFAULT_QUEUE="$DEFAULT_QUEUE_CPU"
+        DEFAULT_MEM=64000
+        DEFAULT_CORES=8
+        DEFAULT_WALL="04:00"
+        DEFAULT_GPU=""   # CPU-only; no -gpu arg
+        ;;
+esac
+
+# Resolve final values: CLI > matching env var > per-method default.
+VENV_PATH="${VENV_PATH:-$DEFAULT_VENV}"
+LSF_QUEUE_FINAL="${QUEUE_ARG:-$DEFAULT_QUEUE}"
+LSF_GROUP_FINAL="${GROUP_ARG:-$LSF_GROUP_DEFAULT}"
+LSF_MEM_FINAL="${MEM_ARG:-$DEFAULT_MEM}"
+LSF_CORES_FINAL="${CORES_ARG:-$DEFAULT_CORES}"
+LSF_WALL_FINAL="${WALL_ARG:-$DEFAULT_WALL}"
+LSF_GPU_FINAL="${GPU_ARG:-$DEFAULT_GPU}"
+
+# Repo root: the lsf/ dir is at <repo_root>/scgg-reproducibility/analysis/benchmarking/lsf/,
+# and the scgg monorepo (the one holding scripts/run_*_pipeline.py) is the
+# sibling. Resolve to absolute path so the runner can `cd` reliably.
+SCGG_REPO_DEFAULT="${SCGG_REPO:-/nfs/team361/sb75/scgg}"
+SCGG_REPO_FINAL="$SCGG_REPO_DEFAULT"
+
+# Pre-compute the per-run TIMESTAMP up front and forward it to the
+# pipeline via --run_timestamp. This pins the LSF log dir, the
+# training artifacts dir, AND the inference artifacts dir to the
+# same TS — so a whole run lives in ONE directory.
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+# Sanitise run name for filesystem use (forward-slashes in particular).
+RUN_NAME_SAFE="${RUN_NAME//\//_}"
+
+# Compute the artifacts root (matches the python pipeline's default).
+# Honour the same env var the pipeline reads — so if the user sets
+# SCGG_ARTIFACTS_ROOT for the pipeline, the submitter's log dir
+# follows automatically.
+ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
+
+# Derive the dataset name the same way the python pipeline does
+# (run_scgg_pipeline._dataset_name_from_args).
+if [[ -n "$DATA_DIR" ]]; then
+    DATASET_NAME="$(basename "$DATA_DIR")"
+elif [[ -n "$TRAIN_CSV" ]]; then
+    DATASET_NAME="$(basename "$(dirname "$(realpath "$TRAIN_CSV")")")"
+    [[ -z "$DATASET_NAME" ]] && DATASET_NAME="luna_paper_csvs"
+else
+    DATASET_NAME="unknown"
+fi
+
+# Per-method subdir name on disk. Mirrors the python pipelines'
+# ENGINE_OUTPUT_SUBDIR convention.
+case "$METHOD" in
+    scgg)       PIPELINE_SUBDIR="scgg_model" ;;
+    luna)       PIPELINE_SUBDIR="luna_model" ;;
+    novosparc)  PIPELINE_SUBDIR="novosparc_inference" ;;
+esac
+
+# LSF stdout/err. Always co-located with the pipeline output for the
+# same run — outputs ONLY land in <dataset>/<method>_(model|inference)/<TS>/
+# and never in a separate top-level tree. PIPELINE_SUBDIR is set
+# above to ``<method>_model`` for scgg+luna (the training subprocess
+# is the "main" output dir) and ``novosparc_inference`` for novosparc
+# (which has no separate training phase).
+LOG_DIR="$ARTIFACTS_ROOT/$DATASET_NAME/$PIPELINE_SUBDIR/$RUN_TS/lsf_logs"
+mkdir -p "$LOG_DIR"
+
+# Verify runner is present.
+RUNNER="$SCRIPT_DIR/_run_pipeline.sh"
+if [[ ! -f "$RUNNER" ]]; then
+    echo "ERROR: missing runner at $RUNNER" >&2
+    exit 1
+fi
+
+# --- Print summary --------------------------------------------------------
+echo "================================================================"
+echo "  submit_pipeline.sh"
+echo "================================================================"
+echo "method        : $METHOD"
+echo "wandb_run     : $RUN_NAME"
+[[ -n "$DATA_DIR" ]] && echo "data_dir      : $DATA_DIR"
+[[ -n "$TRAIN_CSV" ]] && echo "train_csv     : $TRAIN_CSV"
+[[ -n "$TEST_CSV" ]] && echo "test_csv      : $TEST_CSV"
+[[ -n "$EPOCHS" ]] && echo "epochs        : $EPOCHS"
+[[ -n "$SEED" ]] && echo "seed          : $SEED"
+[[ -n "$N_SAMPLES" ]] && echo "n_inference_samples : $N_SAMPLES"
+[[ -n "$OVERRIDE_STRING" ]] && echo "override      : $OVERRIDE_STRING"
+[[ -n "$INFERENCE_OVERRIDE_STRING" ]] && echo "inference_override : $INFERENCE_OVERRIDE_STRING"
+[[ -n "$WANDB_PROJECT" ]] && echo "wandb_project : $WANDB_PROJECT"
+[[ -n "$WANDB_MODE" ]] && echo "wandb_mode    : $WANDB_MODE"
+[[ -n "$EMBEDDING_FIELD" ]] && echo "embedding_field : $EMBEDDING_FIELD"
+echo "----------------------------------------------------------------"
+echo "repo          : $SCGG_REPO_FINAL"
+echo "venv          : $VENV_PATH"
+echo "run timestamp : $RUN_TS"
+echo "per-run dir   : $ARTIFACTS_ROOT/$DATASET_NAME/$PIPELINE_SUBDIR/$RUN_TS/"
+echo "log dir       : $LOG_DIR"
+echo "----------------------------------------------------------------"
+echo "LSF resources :"
+echo "  queue       : $LSF_QUEUE_FINAL"
+echo "  group       : $LSF_GROUP_FINAL"
+echo "  cores       : $LSF_CORES_FINAL"
+echo "  mem (MB)    : $LSF_MEM_FINAL"
+echo "  wall        : $LSF_WALL_FINAL"
+if [[ -n "$LSF_GPU_FINAL" ]]; then
+    echo "  gpu         : $LSF_GPU_FINAL"
+else
+    echo "  gpu         : (none — CPU-only)"
+fi
+echo "dry run       : $DRY_RUN_ARG"
+echo "================================================================"
+
+# --- Build the bsub command ----------------------------------------------
+JOB_NAME="${METHOD}-${RUN_NAME_SAFE}-${RUN_TS}"
+LOG_OUT="$LOG_DIR/submit.out"
+LOG_ERR="$LOG_DIR/submit.err"
+
+# Env vars to forward into the job. The runner reads these and assembles
+# the python pipeline command. ``SCGG_RUN_TIMESTAMP`` is the pinned TS
+# computed up-front in this script; the runner forwards it via
+# ``--run_timestamp`` so the python pipeline writes its output to the
+# same per-run dir whose ``lsf_logs/`` subdir we're already pointing
+# bsub's -o/-e at.
+ENV_PAIRS=("all"
+          "SCGG_RUN_NAME=$RUN_NAME"
+          "SCGG_RUN_TIMESTAMP=$RUN_TS"
+          "SCGG_DATA_DIR=$DATA_DIR"
+          "SCGG_TRAIN_CSV=$TRAIN_CSV"
+          "SCGG_TEST_CSV=$TEST_CSV"
+          "SCGG_EPOCHS=$EPOCHS"
+          "SCGG_SEED=$SEED"
+          "SCGG_N_INFERENCE_SAMPLES=$N_SAMPLES"
+          "SCGG_OVERRIDE=$OVERRIDE_STRING"
+          "SCGG_INFERENCE_OVERRIDE=$INFERENCE_OVERRIDE_STRING"
+          "SCGG_WANDB_PROJECT=$WANDB_PROJECT"
+          "SCGG_WANDB_MODE=$WANDB_MODE"
+          "SCGG_EMBEDDING_FIELD=$EMBEDDING_FIELD")
+# bsub's -env takes a single comma-separated string.
+ENV_STR=$(IFS=,; echo "${ENV_PAIRS[*]}")
+
+BSUB_CMD=(
+    bsub
+    -G "$LSF_GROUP_FINAL"
+    -q "$LSF_QUEUE_FINAL"
+    -n "$LSF_CORES_FINAL"
+    -M "$LSF_MEM_FINAL"
+    -R "select[mem>$LSF_MEM_FINAL] rusage[mem=$LSF_MEM_FINAL]"
+    -R "span[ptile=$LSF_CORES_FINAL]"
+    -W "$LSF_WALL_FINAL"
+    -J "$JOB_NAME"
+    -o "$LOG_OUT"
+    -e "$LOG_ERR"
+    -env "$ENV_STR"
+)
+# Only add -gpu if we have one (novosparc doesn't).
+if [[ -n "$LSF_GPU_FINAL" ]]; then
+    BSUB_CMD+=(-gpu "$LSF_GPU_FINAL")
+fi
+
+# --- Submit -----------------------------------------------------------------
+echo "submitting    :"
+if [[ "$DRY_RUN_ARG" == "1" ]]; then
+    # Pretty-print the command without actually submitting.
+    printf '    %q ' "${BSUB_CMD[@]}"
+    printf '%s %q %q %q %q\n' "bash" "$RUNNER" "$METHOD" "$VENV_PATH" "$SCGG_REPO_FINAL"
+    echo
+    echo "(dry-run; not submitted.)"
+    exit 0
+fi
+
+"${BSUB_CMD[@]}" bash "$RUNNER" "$METHOD" "$VENV_PATH" "$SCGG_REPO_FINAL"
+
+echo
+echo "================================================================"
+echo "submitted job : $JOB_NAME"
+echo "watch with    : bjobs"
+echo "kill with     : bkill -J '$JOB_NAME'"
+echo "logs:"
+echo "  $LOG_OUT"
+echo "  $LOG_ERR"
+echo "per-run dir   : <ARTIFACTS>/<dataset>/${METHOD}_(model|inference)/<TS>/"
+echo "                (timestamped inside the python pipeline)"
+echo "================================================================"

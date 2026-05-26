@@ -224,8 +224,11 @@ log "  avoid the align_vectors 'one vector pair' regression LUNA hits)..."
 "${UV_PIP[@]}" "scipy>=1.10,<1.11"
 
 # 2e. Bridge utilities used by the scgg-side wrapper scripts.
-log "installing pandas / anndata / h5py / matplotlib..."
-"${UV_PIP[@]}" pandas anndata h5py matplotlib
+# psutil powers the _RuntimeTracker's process-tree RSS sampling so
+# peak_rss_mib in runtime.csv captures subprocess work (the training
+# step runs in _luna_runner.py, a subprocess of run_scgg_train.py).
+log "installing pandas / anndata / h5py / matplotlib / psutil..."
+"${UV_PIP[@]}" pandas anndata h5py matplotlib "psutil>=5.9"
 
 # 2f. Uninstall the `lightning` meta-package if any transitive dep
 #     dragged it in (scanpy / squidpy / torch_geometric all sometimes
@@ -394,6 +397,6 @@ log "To run the scgg cortex benchmark (LUNA Figure 3 reproduction, with"
 log "scgg's vendored copy of LUNA under the hood):"
 log "    source $VENV_DIR/bin/activate"
 log "    cd $SCGG_CODE_DIR"
-log "    python scripts/run_luna_cortex_benchmark.py \\"
+log "    python scripts/run_scgg.py \\"
 log "        --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\"
 log "        --wandb_run_name my_run"

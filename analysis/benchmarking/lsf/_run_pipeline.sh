@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# _run_pipeline.sh
+# -----------------------------------------------------------------------------
+# Inside-the-LSF-job runner. NOT invoked directly by humans — used by
+# ``submit_pipeline.sh`` as the body of the ``bsub ... bash _run_pipeline.sh``
+# command.
+#
+# Reads its configuration from environment variables (set by the
+# submitter via bsub -env) so the positional-args surface stays
+# minimal:
+#
+#   $1  METHOD        scgg | luna | novosparc
+#   $2  VENV_PATH     /nfs/team361/sb75/.venvs/<method>
+#   $3  REPO_ROOT     /nfs/team361/sb75/scgg
+#
+# Env vars (all optional; forwarded by the submitter):
+#
+#   SCGG_RUN_NAME             passed to --wandb_run_name (required for
+#                             a meaningful wandb label; submit script
+#                             defaults it before we get here)
+#   SCGG_DATA_DIR             passed to --data_dir
+#   SCGG_TRAIN_CSV            passed to --train_csv (mutually exclusive
+#                             with SCGG_DATA_DIR; submit script enforces)
+#   SCGG_TEST_CSV             passed to --test_csv
+#   SCGG_EPOCHS               passed to --epochs (ignored for novosparc;
+#                             it has no training step)
+#   SCGG_SEED                 passed to --seed
+#   SCGG_N_INFERENCE_SAMPLES  passed to --n_inference_samples (ignored
+#                             for luna — single-sample DDPM only)
+#   SCGG_OVERRIDE             space-separated key=value tokens for the
+#                             pipeline's ``--override`` flag. Forwarded
+#                             as multiple args via word-splitting.
+#                             Example: "model.edm.embed_dim=16 train.lr=1e-4"
+#   SCGG_INFERENCE_OVERRIDE   same, for ``--inference_override``
+#                             (ignored for novosparc — single-process)
+#   SCGG_WANDB_PROJECT        passed to --wandb_project
+#   SCGG_WANDB_MODE           passed to --wandb_mode
+#   SCGG_EMBEDDING_FIELD      passed to --embedding_field (scgg only)
+#
+# The runner activates the venv, switches to the repo root, and execs
+# the appropriate ``run_<method>_pipeline.py`` with the assembled args.
+# ``exec`` so the python process replaces the shell — LSF reports the
+# pipeline's exit code as the job exit code without a wrapper layer.
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+METHOD="${1:?ERROR: METHOD (positional arg 1) required}"
+VENV_PATH="${2:?ERROR: VENV_PATH (positional arg 2) required}"
+REPO_ROOT="${3:?ERROR: REPO_ROOT (positional arg 3) required}"
+
+echo "================================================================"
+echo "  _run_pipeline.sh"
+echo "================================================================"
+echo "host          : $(hostname)"
+echo "date          : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo "method        : $METHOD"
+echo "venv          : $VENV_PATH"
+echo "repo          : $REPO_ROOT"
+echo "----------------------------------------------------------------"
+
+# --- Activate venv -----------------------------------------------------------
+if [[ ! -f "$VENV_PATH/bin/activate" ]]; then
+    echo "ERROR: venv activate script not found at $VENV_PATH/bin/activate" >&2
+    echo "ERROR: run setup_${METHOD}_env.sh first." >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$VENV_PATH/bin/activate"
+echo "python        : $(python --version) -> $(which python)"
+
+# --- cd into the repo --------------------------------------------------------
+if [[ ! -d "$REPO_ROOT/scripts" ]]; then
+    echo "ERROR: REPO_ROOT=$REPO_ROOT does not contain scripts/" >&2
+    exit 1
+fi
+cd "$REPO_ROOT"
+
+# --- Pick pipeline script ----------------------------------------------------
+case "$METHOD" in
+    scgg)
+        SCRIPT="scripts/run_scgg_pipeline.py"
+        ;;
+    luna)
+        SCRIPT="scripts/run_luna_pipeline.py"
+        ;;
+    novosparc)
+        SCRIPT="scripts/run_novosparc_pipeline.py"
+        ;;
+    *)
+        echo "ERROR: unknown METHOD='$METHOD'. Expected scgg|luna|novosparc." >&2
+        exit 1
+        ;;
+esac
+
+if [[ ! -f "$SCRIPT" ]]; then
+    echo "ERROR: pipeline script missing: $REPO_ROOT/$SCRIPT" >&2
+    exit 1
+fi
+
+# --- Assemble pipeline args from env -----------------------------------------
+ARGS=()
+
+# Data source — one of (--data_dir) or (--train_csv + --test_csv). The
+# submitter validates that exactly one mode is supplied; here we just
+# forward whichever variables are set.
+if [[ -n "${SCGG_DATA_DIR:-}" ]]; then
+    ARGS+=(--data_dir "$SCGG_DATA_DIR")
+fi
+if [[ -n "${SCGG_TRAIN_CSV:-}" ]]; then
+    ARGS+=(--train_csv "$SCGG_TRAIN_CSV")
+fi
+if [[ -n "${SCGG_TEST_CSV:-}" ]]; then
+    ARGS+=(--test_csv "$SCGG_TEST_CSV")
+fi
+
+# Run name (the only flag we strongly recommend always setting).
+if [[ -n "${SCGG_RUN_NAME:-}" ]]; then
+    ARGS+=(--wandb_run_name "$SCGG_RUN_NAME")
+fi
+
+# Pinned timestamp from the submitter (so LSF logs + pipeline outputs
+# share the same per-run directory). Only the scgg pipeline accepts
+# --run_timestamp today; luna/novosparc fall back to their auto-
+# generated timestamps. Silently no-op for those methods rather than
+# crashing the job with an unknown-arg error.
+if [[ -n "${SCGG_RUN_TIMESTAMP:-}" ]] && [[ "$METHOD" == "scgg" ]]; then
+    ARGS+=(--run_timestamp "$SCGG_RUN_TIMESTAMP")
+fi
+
+# wandb project / mode.
+if [[ -n "${SCGG_WANDB_PROJECT:-}" ]]; then
+    ARGS+=(--wandb_project "$SCGG_WANDB_PROJECT")
+fi
+if [[ -n "${SCGG_WANDB_MODE:-}" ]]; then
+    ARGS+=(--wandb_mode "$SCGG_WANDB_MODE")
+fi
+
+# Method-specific arg gating: novosparc has no training-time flags;
+# luna has no multi-sample inference.
+if [[ -n "${SCGG_SEED:-}" ]]; then
+    ARGS+=(--seed "$SCGG_SEED")
+fi
+if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_EPOCHS:-}" ]]; then
+    ARGS+=(--epochs "$SCGG_EPOCHS")
+fi
+if [[ "$METHOD" != "luna" ]] && [[ -n "${SCGG_N_INFERENCE_SAMPLES:-}" ]]; then
+    ARGS+=(--n_inference_samples "$SCGG_N_INFERENCE_SAMPLES")
+fi
+
+# scgg-only: pretrained-embedding obsm field.
+if [[ "$METHOD" == "scgg" ]] && [[ -n "${SCGG_EMBEDDING_FIELD:-}" ]]; then
+    ARGS+=(--embedding_field "$SCGG_EMBEDDING_FIELD")
+fi
+
+# Override strings — split on whitespace into multiple args. The user
+# passed something like SCGG_OVERRIDE="model.edm.embed_dim=16 train.lr=1e-4";
+# the pipeline's --override is action="extend" nargs="+" so it accepts
+# the multiple tokens directly.
+if [[ -n "${SCGG_OVERRIDE:-}" ]]; then
+    # shellcheck disable=SC2206  # intentional word-splitting
+    OVERRIDE_TOKENS=( $SCGG_OVERRIDE )
+    ARGS+=(--override "${OVERRIDE_TOKENS[@]}")
+fi
+if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_INFERENCE_OVERRIDE:-}" ]]; then
+    # shellcheck disable=SC2206
+    INFER_TOKENS=( $SCGG_INFERENCE_OVERRIDE )
+    ARGS+=(--inference_override "${INFER_TOKENS[@]}")
+fi
+
+# --- Print + run -------------------------------------------------------------
+echo "----------------------------------------------------------------"
+echo "command       : python $SCRIPT \\"
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+    if [[ "${ARGS[$i]}" == --* ]]; then
+        echo "    ${ARGS[$i]} \\"
+    else
+        # value for the prior flag — combine on one line for readability
+        # (this is purely for the log).
+        echo "        ${ARGS[$i]} \\"
+    fi
+done
+echo "================================================================"
+
+# `exec` so the LSF job's exit code is whatever the pipeline returns.
+exec python "$SCRIPT" "${ARGS[@]}"

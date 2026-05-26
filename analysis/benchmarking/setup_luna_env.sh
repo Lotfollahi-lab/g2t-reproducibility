@@ -163,8 +163,11 @@ log "  avoid the align_vectors 'one vector pair' regression LUNA hits)..."
 "${UV_PIP[@]}" "scipy>=1.10,<1.11"
 
 # 3e. Bridge utilities we use from the scgg-side LUNA wrapper scripts.
-log "installing pandas / anndata / h5py / matplotlib..."
-"${UV_PIP[@]}" pandas anndata h5py matplotlib
+# psutil powers the _RuntimeTracker's process-tree RSS sampling so
+# peak_rss_mib captures the subprocess work (LUNA training runs in
+# _luna_runner.py — a subprocess of the wrapper script).
+log "installing pandas / anndata / h5py / matplotlib / psutil..."
+"${UV_PIP[@]}" pandas anndata h5py matplotlib "psutil>=5.9"
 
 # 3f. Uninstall the `lightning` meta-package if any transitive dep dragged
 #     it in (scanpy / squidpy / torch_geometric all sometimes do). Why:
@@ -282,6 +285,6 @@ log "  LUNA code : $LUNA_CODE_DIR"
 log ""
 log "To run LUNA training via our wrapper:"
 log "    source $VENV_DIR/bin/activate"
-log "    python scgg/scripts/run_luna_on_mmc.py \\"
+log "    python scgg/scripts/run_luna.py \\"
 log "        --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \\"
 log "        --luna_repo $LUNA_CODE_DIR"

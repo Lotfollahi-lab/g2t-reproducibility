@@ -43,7 +43,7 @@ From a shell on a GPU node:
 cd /path/to/scgg_claude_project/scgg
 pip install -e .
 
-python scripts/run_luna_cortex_benchmark.py \
+python scripts/run_scgg.py \
     --data_dir /nfs/team361/sb75/DATASETS/silver/mmc_luna \
     --epochs 200 \
     --batch_size 8192 \
@@ -60,7 +60,7 @@ that produced them. Pass `--output_dir` explicitly to override.
 From a notebook (see `notebooks/scgg_luna_cortex_benchmark.ipynb`):
 
 ```python
-from scripts.run_luna_cortex_benchmark import run_benchmark
+from scripts.run_scgg import run_benchmark
 
 agg = run_benchmark(
     data_dir="/nfs/team361/sb75/DATASETS/silver/mmc_luna",
