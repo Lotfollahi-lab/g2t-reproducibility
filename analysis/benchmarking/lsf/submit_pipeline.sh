@@ -43,6 +43,14 @@
 #   --wandb_mode M        disabled|online|offline|dryrun. Default: online.
 #   --embedding_field F   adata.obsm key for pretrained gene embeddings
 #                         (scgg only).
+#   --skip_training       Skip the train block, run inference only on
+#                         an existing checkpoint (luna only for now).
+#                         REQUIRES --checkpoint=<path>. Common use:
+#                         re-running inference with different
+#                         dataset.num_workers when training succeeded
+#                         but inference OOMed on a large dataset.
+#   --checkpoint PATH     Existing .ckpt path to reuse. Paired with
+#                         --skip_training.
 #
 # LSF resources (sensible defaults baked in; override per submission):
 #   --queue / -q Q        LSF queue. Default: training-parallel for all
@@ -71,7 +79,13 @@
 #   ---------- ------------------ ------ ------ ------ -----
 #   scgg        training-parallel  128000   24   24:00  1
 #   luna        training-parallel  128000   24   24:00  1
-#   novosparc   training-parallel   64000    8   04:00  none
+#   novosparc   normal              64000    8   04:00  none
+#
+# NOTE: ``training-parallel`` is a GPU queue; LSF's ``esub`` validator
+# rejects jobs that target it without a ``-gpu`` request. novosparc
+# is CPU-only OT and doesn't use a GPU, so its default queue is
+# ``normal`` instead. Override per-submission with ``--queue <name>``
+# if your cluster's CPU queue has a different name.
 #
 # Examples:
 #   # scgg with anisotropic gating on top of new defaults
@@ -158,7 +172,14 @@ LSF_GROUP_DEFAULT="${LSF_GROUP:-s10396}"
 # Per-method default resources. The submitter picks one row based on
 # --method, but each cell is overridable via the matching --flag.
 DEFAULT_QUEUE_GPU="${LSF_QUEUE:-training-parallel}"
-DEFAULT_QUEUE_CPU="${LSF_QUEUE:-training-parallel}"
+# CPU queue MUST be a non-GPU queue. The cluster's esub validator
+# rejects jobs that target a GPU queue (e.g. training-parallel)
+# without a ``-gpu`` request, and the novosparc method legitimately
+# doesn't use a GPU (it's a CPU-only OT solver). ``normal`` is the
+# most common non-GPU queue name; if your cluster uses a different
+# name (research / batch / cpu-normal / etc.) override per-submission
+# with ``--queue <name>`` or globally with ``LSF_QUEUE=<name>``.
+DEFAULT_QUEUE_CPU="${LSF_QUEUE:-normal}"
 
 # --- Help -----------------------------------------------------------------
 print_help() {
@@ -180,6 +201,8 @@ INFERENCE_OVERRIDE_STRING=""
 WANDB_PROJECT=""
 WANDB_MODE=""
 EMBEDDING_FIELD=""
+SKIP_TRAINING=""
+CHECKPOINT=""
 
 QUEUE_ARG=""
 GROUP_ARG="$LSF_GROUP_DEFAULT"
@@ -230,6 +253,10 @@ while [[ $# -gt 0 ]]; do
             WANDB_MODE="${2:?--wandb_mode requires a value}"; shift 2 ;;
         --embedding_field)
             EMBEDDING_FIELD="${2:?--embedding_field requires a value}"; shift 2 ;;
+        --skip_training)
+            SKIP_TRAINING=1; shift ;;
+        --checkpoint)
+            CHECKPOINT="${2:?--checkpoint requires a value}"; shift 2 ;;
         --queue|-q)
             QUEUE_ARG="${2:?--queue requires a value}"; shift 2 ;;
         --group|-g)
@@ -281,6 +308,23 @@ if [[ -n "$TRAIN_CSV" && -z "$TEST_CSV" ]] || [[ -z "$TRAIN_CSV" && -n "$TEST_CS
 fi
 if [[ "$METHOD" == "novosparc" ]] && [[ -z "$DATA_DIR" ]]; then
     echo "ERROR: novosparc pipeline only supports --data_dir (silver h5ad input)." >&2
+    exit 2
+fi
+
+# Inference-only validation. Currently only the LUNA pipeline accepts
+# --skip_training + --checkpoint; flag confusion gets caught here so
+# the user gets a clear error rather than a python-side argparse fail
+# inside the LSF job.
+if [[ -n "$SKIP_TRAINING" ]] && [[ -z "$CHECKPOINT" ]]; then
+    echo "ERROR: --skip_training requires --checkpoint=<path>." >&2
+    exit 2
+fi
+if [[ -n "$SKIP_TRAINING" ]] && [[ "$METHOD" != "luna" ]]; then
+    echo "ERROR: --skip_training is only supported by --method=luna (for now). Got --method=$METHOD." >&2
+    exit 2
+fi
+if [[ -n "$CHECKPOINT" ]] && [[ -z "$SKIP_TRAINING" ]]; then
+    echo "ERROR: --checkpoint is only meaningful with --skip_training (otherwise the pipeline auto-discovers the trained ckpt)." >&2
     exit 2
 fi
 
@@ -396,6 +440,8 @@ echo "wandb_run     : $RUN_NAME"
 [[ -n "$WANDB_PROJECT" ]] && echo "wandb_project : $WANDB_PROJECT"
 [[ -n "$WANDB_MODE" ]] && echo "wandb_mode    : $WANDB_MODE"
 [[ -n "$EMBEDDING_FIELD" ]] && echo "embedding_field : $EMBEDDING_FIELD"
+[[ -n "$SKIP_TRAINING" ]] && echo "skip_training : 1 (inference-only)"
+[[ -n "$CHECKPOINT" ]] && echo "checkpoint    : $CHECKPOINT"
 echo "----------------------------------------------------------------"
 echo "repo          : $SCGG_REPO_FINAL"
 echo "venv          : $VENV_PATH"
@@ -455,6 +501,13 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     printf 'export SCGG_WANDB_PROJECT=%q\n'      "$WANDB_PROJECT"
     printf 'export SCGG_WANDB_MODE=%q\n'         "$WANDB_MODE"
     printf 'export SCGG_EMBEDDING_FIELD=%q\n'    "$EMBEDDING_FIELD"
+    # Inference-only mode: when SKIP_TRAINING is set, the runner
+    # forwards --skip_training + --checkpoint to the python pipeline,
+    # which then skips the train block and reuses the provided ckpt.
+    # Only currently supported by run_luna_pipeline.py; scgg/novosparc
+    # will reject the flag if added later there.
+    printf 'export SCGG_SKIP_TRAINING=%q\n'      "$SKIP_TRAINING"
+    printf 'export SCGG_CHECKPOINT=%q\n'         "$CHECKPOINT"
     # Also forward the artifacts root so the runner / pipeline reads
     # the same place the submitter wrote logs to.
     printf 'export SCGG_ARTIFACTS_ROOT=%q\n'     "$ARTIFACTS_ROOT"
