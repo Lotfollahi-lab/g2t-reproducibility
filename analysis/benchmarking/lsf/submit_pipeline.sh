@@ -59,12 +59,21 @@
 #   --group / -g G        LSF cost-code group. Default: \$LSF_GROUP or
 #                         the value baked in below.
 #   --mem MB              memory cap in MB (rusage + select). Defaults
-#                         per-method: 128000 for scgg/luna, 64000 for
-#                         novosparc.
+#                         per-method: 256000 for scgg/luna, 96000 for
+#                         novosparc. Bumped 2026-05-28 from 128/64 GB
+#                         because CNS-scale LUNA training peaked at
+#                         ~516 GB RSS with 32 DataLoader workers; the
+#                         128 GB cap routinely SIGTERM'd inference.
+#                         For small datasets (MMC cortex) you can
+#                         override down via --mem 64000 to schedule
+#                         faster on shared queues.
 #   --cores N             cores. Defaults: 24 for scgg/luna, 8 for novosparc.
-#   --wall HH:MM          wall-clock cap. Defaults: 24:00 for scgg/luna
-#                         (full 1000-epoch training fits), 04:00 for
-#                         novosparc (CPU-only OT solve per slice).
+#   --wall HH:MM          wall-clock cap. Defaults: 48:00 for scgg/luna,
+#                         08:00 for novosparc. Bumped 2026-05-28 from
+#                         24:00 / 04:00 to accommodate 2000-epoch
+#                         training runs and full inference on
+#                         CNS-scale data. Override down for small
+#                         datasets via --wall.
 #   --gpu STR             -gpu argument. Default for scgg/luna:
 #                         mode=exclusive_process:num=1:block=yes.
 #                         novosparc defaults to no GPU.
@@ -77,9 +86,9 @@
 #
 #   method      queue              mem    cores  wall   gpu
 #   ---------- ------------------ ------ ------ ------ -----
-#   scgg        training-parallel  128000   24   24:00  1
-#   luna        training-parallel  128000   24   24:00  1
-#   novosparc   normal              64000    8   04:00  none
+#   scgg        training-parallel  256000   24   48:00  1
+#   luna        training-parallel  256000   24   48:00  1
+#   novosparc   normal              96000    8   08:00  none
 #
 # NOTE: ``training-parallel`` is a GPU queue; LSF's ``esub`` validator
 # rejects jobs that target it without a ``-gpu`` request. novosparc
@@ -331,30 +340,41 @@ fi
 # --- Per-method defaults --------------------------------------------------
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
+# Defaults sized for the LARGEST realistic dataset (CNS scRNA, ABCA
+# Animal-1) so a single bsub-default invocation succeeds without
+# per-run --mem / --wall tuning. Override down via --mem / --wall
+# for small datasets (e.g. MMC cortex) if you care about scheduler
+# priority — small jobs schedule faster on lightly-loaded queues
+# when their resource request is small. Bumped 2026-05-28 from
+# 128 GB / 24h to 256 GB / 48h after a CNS LUNA inference hit
+# LSF SIGTERM with peak RSS ~500 GB at default 32 workers — see
+# the matching ``dataset.num_workers`` fix in
+# luna_src/utils/data/abstract_datatype.py.
+#
 # Default venv paths follow the setup_*_env.sh convention.
 case "$METHOD" in
     scgg)
         DEFAULT_VENV="/nfs/team361/sb75/.venvs/scgg"
         DEFAULT_QUEUE="$DEFAULT_QUEUE_GPU"
-        DEFAULT_MEM=128000
+        DEFAULT_MEM=256000
         DEFAULT_CORES=24
-        DEFAULT_WALL="24:00"
+        DEFAULT_WALL="48:00"
         DEFAULT_GPU="mode=exclusive_process:num=1:block=yes"
         ;;
     luna)
         DEFAULT_VENV="/nfs/team361/sb75/.venvs/luna"
         DEFAULT_QUEUE="$DEFAULT_QUEUE_GPU"
-        DEFAULT_MEM=128000
+        DEFAULT_MEM=256000
         DEFAULT_CORES=24
-        DEFAULT_WALL="24:00"
+        DEFAULT_WALL="48:00"
         DEFAULT_GPU="mode=exclusive_process:num=1:block=yes"
         ;;
     novosparc)
         DEFAULT_VENV="/nfs/team361/sb75/.venvs/novosparc"
         DEFAULT_QUEUE="$DEFAULT_QUEUE_CPU"
-        DEFAULT_MEM=64000
+        DEFAULT_MEM=96000
         DEFAULT_CORES=8
-        DEFAULT_WALL="04:00"
+        DEFAULT_WALL="08:00"
         DEFAULT_GPU=""   # CPU-only; no -gpu arg
         ;;
 esac
