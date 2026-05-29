@@ -349,7 +349,7 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 # 128 GB / 24h to 256 GB / 48h after a CNS LUNA inference hit
 # LSF SIGTERM with peak RSS ~500 GB at default 32 workers — see
 # the matching ``dataset.num_workers`` fix in
-# luna_src/utils/data/abstract_datatype.py.
+# benchmarking/luna/utils/data/abstract_datatype.py.
 #
 # Default venv paths follow the setup_*_env.sh convention.
 case "$METHOD" in

@@ -86,14 +86,30 @@ UV_PIP=(uv pip install --python "$VENV_DIR/bin/python")
 # ---------------------------------------------------------------------------
 # 2. Clone (or update) the LUNA repository
 # ---------------------------------------------------------------------------
-if [[ -d "$LUNA_CODE_DIR/.git" ]]; then
-    log "LUNA repo present at $LUNA_CODE_DIR; pulling latest..."
-    (cd "$LUNA_CODE_DIR" && git fetch && git checkout "$LUNA_GIT_REF" && git pull --ff-only)
-elif [[ -d "$LUNA_CODE_DIR" ]]; then
-    log "LUNA code dir exists but is not a git checkout; skipping clone."
-    log "  ($LUNA_CODE_DIR)"
+# NOTE (2026-05-28): we used to maintain two LUNA copies — one git-
+# clone of upstream at ``$LUNA_CODE_DIR``, and a separate manually-
+# patched ``luna_src/`` snapshot. Confusing in practice ("which one
+# do I edit?") and led to fixes silently not taking effect (see
+# the ``dataset.num_workers`` saga). The luna_src/ copy was
+# consolidated INTO this directory; now there's a single
+# manually-maintained LUNA tree containing local patches
+# (num_workers fix, configs/experiment yaml extensions, etc.) that
+# is gitignored from the scgg-reproducibility repo and synced
+# manually to the cluster.
+#
+# Consequences for THIS script:
+#   * If $LUNA_CODE_DIR already contains files (any content), do
+#     NOT git-pull — that would clobber local patches. We only
+#     clone-fresh when the directory is completely missing.
+#   * If you want to refresh from upstream LUNA, do it manually:
+#       cd $LUNA_CODE_DIR && git fetch && git rebase origin/main
+#     then re-test that local patches still apply.
+if [[ -d "$LUNA_CODE_DIR" ]] && [[ -n "$(ls -A "$LUNA_CODE_DIR" 2>/dev/null)" ]]; then
+    log "LUNA code dir already populated at $LUNA_CODE_DIR; skipping clone."
+    log "  (manually-patched copy — to refresh from upstream, see the"
+    log "   inline comment in this script just above this branch)"
 else
-    log "cloning LUNA into $LUNA_CODE_DIR..."
+    log "cloning LUNA into empty $LUNA_CODE_DIR..."
     mkdir -p "$(dirname "$LUNA_CODE_DIR")"
     git clone "$LUNA_GIT_URL" "$LUNA_CODE_DIR"
     (cd "$LUNA_CODE_DIR" && git checkout "$LUNA_GIT_REF")
