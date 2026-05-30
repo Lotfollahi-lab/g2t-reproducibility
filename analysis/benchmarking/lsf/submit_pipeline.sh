@@ -398,11 +398,40 @@ LSF_GPU_FINAL="${GPU_ARG:-$DEFAULT_GPU}"
 SCGG_REPO_DEFAULT="${SCGG_REPO:-/nfs/team361/sb75/scgg}"
 SCGG_REPO_FINAL="$SCGG_REPO_DEFAULT"
 
-# Pre-compute the per-run TIMESTAMP up front and forward it to the
-# pipeline via --run_timestamp. This pins the LSF log dir, the
-# training artifacts dir, AND the inference artifacts dir to the
-# same TS — so a whole run lives in ONE directory.
-RUN_TS="$(date +%Y%m%d_%H%M%S)"
+# Pre-compute the per-run TIMESTAMP and forward it to the pipeline
+# via --run_timestamp. This pins the training artifacts dir AND the
+# inference artifacts dir to the same TS — so a whole run lives in
+# ONE directory. The LSF log dir tracks the same TS in the normal
+# train→infer flow.
+#
+# --skip_training recovery path: regex-extract the TS from
+# --checkpoint so inference artifacts land under
+# scgg_inference/<old_TS>/, pairing with the original training's
+# scgg_model/<old_TS>/. But the LSF logs need a SEPARATE fresh TS
+# to avoid clobbering the original training's lsf_logs/submit.{out,err}
+# — handled below where LOG_DIR is computed.
+FRESH_TS="$(date +%Y%m%d_%H%M%S)"
+if [[ -n "$SKIP_TRAINING" ]] && [[ -n "$CHECKPOINT" ]]; then
+    # The first YYYYMMDD_HHMMSS-shaped token in the path is the
+    # right one — the pipeline writes
+    # <ARTIFACTS>/<dataset>/scgg_model/<TS>/best_model.ckpt, so the
+    # TS is the directory immediately above the .ckpt.
+    INHERITED_TS="$(echo "$CHECKPOINT" | grep -oE '[0-9]{8}_[0-9]{6}(_[A-Za-z0-9]+)?' | head -1)"
+    if [[ -n "$INHERITED_TS" ]]; then
+        RUN_TS="$INHERITED_TS"
+        IS_RECOVERY=1
+        echo "INFO  : --skip_training set; inheriting RUN_TS=$RUN_TS from --checkpoint path"
+        echo "        Inference artifacts → scgg_inference/$RUN_TS/  (pairs with original training)"
+        echo "        Recovery LSF logs    → scgg_model/$RUN_TS/lsf_logs/recovery_$FRESH_TS/"
+    else
+        RUN_TS="$FRESH_TS"
+        IS_RECOVERY=0
+        echo "WARN  : --skip_training set but no YYYYMMDD_HHMMSS in --checkpoint path; using fresh RUN_TS=$RUN_TS" >&2
+    fi
+else
+    RUN_TS="$FRESH_TS"
+    IS_RECOVERY=0
+fi
 # Sanitise run name for filesystem use (forward-slashes in particular).
 RUN_NAME_SAFE="${RUN_NAME//\//_}"
 
@@ -437,7 +466,17 @@ esac
 # above to ``<method>_model`` for scgg+luna (the training subprocess
 # is the "main" output dir) and ``novosparc_inference`` for novosparc
 # (which has no separate training phase).
-LOG_DIR="$ARTIFACTS_ROOT/$DATASET_NAME/$PIPELINE_SUBDIR/$RUN_TS/lsf_logs"
+#
+# Recovery flow (--skip_training + inherited TS): put the LSF logs
+# under a ``recovery_<FRESH_TS>/`` subfolder of the inherited TS's
+# lsf_logs dir, so they don't clobber the original training run's
+# submit.out / submit.err. The artifacts themselves still land
+# under scgg_inference/<inherited_TS>/ via SCGG_RUN_TIMESTAMP below.
+if [[ "$IS_RECOVERY" == "1" ]]; then
+    LOG_DIR="$ARTIFACTS_ROOT/$DATASET_NAME/$PIPELINE_SUBDIR/$RUN_TS/lsf_logs/recovery_$FRESH_TS"
+else
+    LOG_DIR="$ARTIFACTS_ROOT/$DATASET_NAME/$PIPELINE_SUBDIR/$RUN_TS/lsf_logs"
+fi
 mkdir -p "$LOG_DIR"
 
 # Verify runner is present.
