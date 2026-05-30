@@ -42,9 +42,10 @@
 #                             the pipeline reuses instead of training a
 #                             fresh model (luna only)
 #   SCGG_EXCLUDE_TEST_FILES   comma-separated *_test.h5ad basenames to
-#                             drop from the assembled test set (luna
-#                             only). Useful for skipping too-large
-#                             slices that GPU-OOM during inference.
+#                             drop from the assembled test set (scgg
+#                             + luna; novosparc has no equivalent).
+#                             Useful for skipping too-large slices
+#                             that GPU-OOM during inference.
 #
 # The runner activates the venv, switches to the repo root, and execs
 # the appropriate ``run_<method>_pipeline.py`` with the assembled args.
@@ -172,10 +173,13 @@ fi
 if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_CHECKPOINT:-}" ]]; then
     ARGS+=(--checkpoint "$SCGG_CHECKPOINT")
 fi
-# Per-file test-set exclusion (currently only consumed by the LUNA
-# pipeline → run_luna_inference → run_benchmark, which filters
-# *_test.h5ad files by basename before building test.csv).
-if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_EXCLUDE_TEST_FILES:-}" ]]; then
+# Per-file test-set exclusion. Consumed by BOTH the LUNA pipeline
+# (→ run_luna_inference → run_benchmark) AND the scgg pipeline
+# (→ run_scgg_inference → run_scgg_train.run_benchmark), which
+# filter *_test.h5ad files by basename before building test.csv.
+# novosparc has no equivalent flag — its pipeline is single-process
+# and doesn't go through a *_test.h5ad CSV-building step the same way.
+if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_EXCLUDE_TEST_FILES:-}" ]]; then
     ARGS+=(--exclude_test_files "$SCGG_EXCLUDE_TEST_FILES")
 fi
 
