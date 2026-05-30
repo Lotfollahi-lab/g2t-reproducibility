@@ -323,16 +323,17 @@ if [[ "$METHOD" == "novosparc" ]] && [[ -z "$DATA_DIR" ]]; then
     exit 2
 fi
 
-# Inference-only validation. Currently only the LUNA pipeline accepts
-# --skip_training + --checkpoint; flag confusion gets caught here so
+# Inference-only validation. Both the LUNA and scgg pipelines accept
+# --skip_training + --checkpoint; novosparc has no training phase, so
+# the flag is meaningless there. Flag confusion gets caught here so
 # the user gets a clear error rather than a python-side argparse fail
 # inside the LSF job.
 if [[ -n "$SKIP_TRAINING" ]] && [[ -z "$CHECKPOINT" ]]; then
     echo "ERROR: --skip_training requires --checkpoint=<path>." >&2
     exit 2
 fi
-if [[ -n "$SKIP_TRAINING" ]] && [[ "$METHOD" != "luna" ]]; then
-    echo "ERROR: --skip_training is only supported by --method=luna (for now). Got --method=$METHOD." >&2
+if [[ -n "$SKIP_TRAINING" ]] && [[ "$METHOD" == "novosparc" ]]; then
+    echo "ERROR: --skip_training is not applicable to --method=novosparc (no training phase). Use --method=scgg or --method=luna." >&2
     exit 2
 fi
 if [[ -n "$CHECKPOINT" ]] && [[ -z "$SKIP_TRAINING" ]]; then

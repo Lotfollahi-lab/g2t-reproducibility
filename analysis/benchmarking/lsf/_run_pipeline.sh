@@ -36,11 +36,12 @@
 #   SCGG_WANDB_PROJECT        passed to --wandb_project
 #   SCGG_WANDB_MODE           passed to --wandb_mode
 #   SCGG_EMBEDDING_FIELD      passed to --embedding_field (scgg only)
-#   SCGG_SKIP_TRAINING        if non-empty, append --skip_training (luna
-#                             only; scgg/novosparc pipelines don't have it)
+#   SCGG_SKIP_TRAINING        if non-empty, append --skip_training
+#                             (scgg + luna; novosparc has no training
+#                             phase so the flag is rejected upstream)
 #   SCGG_CHECKPOINT           paired with SCGG_SKIP_TRAINING — the .ckpt
 #                             the pipeline reuses instead of training a
-#                             fresh model (luna only)
+#                             fresh model (scgg + luna)
 #   SCGG_EXCLUDE_TEST_FILES   comma-separated *_test.h5ad basenames to
 #                             drop from the assembled test set (scgg
 #                             + luna; novosparc has no equivalent).
@@ -164,13 +165,14 @@ if [[ "$METHOD" == "scgg" ]] && [[ -n "${SCGG_EMBEDDING_FIELD:-}" ]]; then
     ARGS+=(--embedding_field "$SCGG_EMBEDDING_FIELD")
 fi
 
-# Inference-only mode. Currently only the LUNA pipeline accepts
-# --skip_training + --checkpoint (validated upstream in
-# submit_pipeline.sh; flag forwarded only for luna for safety).
-if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_SKIP_TRAINING:-}" ]]; then
+# Inference-only mode. Both LUNA and scgg pipelines accept
+# --skip_training + --checkpoint; novosparc is gated out because it
+# has no training phase to skip. Upstream validator in
+# submit_pipeline.sh enforces the same rule.
+if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_SKIP_TRAINING:-}" ]]; then
     ARGS+=(--skip_training)
 fi
-if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_CHECKPOINT:-}" ]]; then
+if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_CHECKPOINT:-}" ]]; then
     ARGS+=(--checkpoint "$SCGG_CHECKPOINT")
 fi
 # Per-file test-set exclusion. Consumed by BOTH the LUNA pipeline
