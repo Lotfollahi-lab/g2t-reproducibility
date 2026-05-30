@@ -1,40 +1,49 @@
 """plot_spearman_g2t_vs_luna.py
 
-Compare G2T (formerly scGG) vs LUNA on the MMC cortex benchmark by the
-``spearman_mean_of_medians`` metric reported in each run's
-``metrics.csv``. Five seeds per method; bar = mean across seeds, error
-bar = SEM, jittered dots = individual seeds. Single-panel figure in
-the same Nature-journal style as the MintFlow benchmarking notebook
-this script was adapted from.
+Compare G2T (formerly scGG) vs LUNA on the MMC cortex benchmark across
+the full LUNA-paper metric battery — Spearman (mean of medians AND
+mean of means), contact precision / recall / F1, and three flavours of
+RSSD (absolute, mean-of-per-class, sum-of-per-class). One panel per
+metric, all in the same Nature-journal style as the MintFlow
+benchmarking notebook this script was adapted from.
 
-The G2T (scGG) timestamps are HARDCODED in ``SCGG_TIMESTAMPS`` below
-because the user has run more than five training jobs in the scgg_inference
-tree and wants to pin which five seeds form the published comparison.
-Edit that list to swap seeds in/out. The LUNA timestamps are
-AUTO-DISCOVERED from ``LUNA_INFERENCE_ROOT``: every immediate
-subdirectory matching ``YYYYMMDD_HHMMSS`` is treated as a seed run and
-the metrics.csv inside is loaded. If you want to restrict LUNA the
-same way, replace the ``_discover_luna_timestamps`` call with an
-explicit list (same shape as SCGG_TIMESTAMPS).
+Reads pre-computed ``extended_metrics.csv`` files produced by
+``compute_extended_metrics.py`` (one per inference timestamp directory).
+That script loops over each per-slice ``metadata_pred.csv`` +
+``metadata_true.csv`` pair, calls the byte-faithful LUNA-metric
+reimplementations in ``scgg.evaluation.luna_metrics``, and aggregates
+across slices. Run it FIRST against the same timestamps you want to
+plot, or this script will fail loudly because ``extended_metrics.csv``
+won't exist yet.
 
-Outputs ``g2t_vs_luna_spearman.{svg,pdf,png}`` + a processed CSV
-(``g2t_vs_luna_spearman_processed.csv``) into OUT_DIR. SVG is the
-primary deliverable per the user request; PDF/PNG are written
-alongside so the same script feeds the supplemental and the slide
-decks without re-running.
+The G2T (scGG) timestamps are HARDCODED in ``DEFAULT_SCGG_TIMESTAMPS``
+below because the scgg_inference tree typically holds more runs than
+the canonical N seeds we want in the published comparison. Override
+via ``--scgg_timestamps ts1,ts2,...`` on the CLI. The LUNA timestamps
+are AUTO-DISCOVERED from ``LUNA_INFERENCE_ROOT``.
 
-LSF: this is a tiny CPU-only matplotlib job (~seconds). Submit with
+Outputs (into OUT_DIR):
+    g2t_vs_luna_extended_metrics.{svg,pdf,png}    ← 2×4 multi-panel figure
+    g2t_vs_luna_extended_metrics_processed.csv    ← tidy long-form data
+
+Per-panel design (mirrors the notebook AUC cell):
+    - bar         = mean across seeds
+    - error bar   = SEM
+    - jittered    = individual seed dots
+    - right-side  = "0.463 ± 0.012  (+3.2% ↑ vs LUNA)" on the best method
+
+LSF: tiny CPU-only matplotlib job (~seconds). Submit with
 ``bash submit_plot_spearman_g2t_vs_luna.sh`` in the sibling lsf/ dir,
-which fires it on the ``normal`` queue with 4GB / 1 core / 10min.
+which fires it on the ``normal`` queue with 4 GB / 1 core / 10 min.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -56,8 +65,7 @@ SCGG_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "scgg_inference"
 # G2T (scGG) seeds — DEFAULT picks the canonical five by timestamp
 # because the scgg_inference tree contains more than five runs and we
 # need to pin which five form the published comparison. Override via
-# ``--scgg_timestamps ts1,ts2,...`` on the CLI (see __main__ block);
-# pass anything from 1 to N comma-separated timestamps.
+# ``--scgg_timestamps ts1,ts2,...`` on the CLI.
 DEFAULT_SCGG_TIMESTAMPS = [
     "20260530_133432",
     "20260530_133426",
@@ -68,9 +76,57 @@ DEFAULT_SCGG_TIMESTAMPS = [
 
 OUT_DIR = ARTIFACTS_ROOT / DATASET / "comparison_plots"
 
-METRIC_COL = "spearman_mean_of_medians"
-METRIC_LABEL = "Spearman's Rank Correlation"
-METRIC_HIGHER_IS_BETTER = True
+# Filename of the per-timestamp aggregated CSV written by
+# compute_extended_metrics.py — single-row schema mirroring the
+# pipeline's metrics.csv convention.
+EXTENDED_METRICS_FILENAME = "extended_metrics.csv"
+
+
+class MetricSpec(NamedTuple):
+    """Description of one metric → one panel.
+
+    Attributes:
+        column: Column name in extended_metrics.csv. Single value per
+            seed (the aggregate across that seed's test slices, computed
+            by ``aggregate_slices`` in luna_metrics.py).
+        label: Human-readable panel title.
+        higher_is_better: Controls (a) which method gets the
+            "+X.X% vs other" tag in the panel annotation, (b) the
+            arrow shown next to the percent (↑ if True, ↓ if False).
+    """
+    column: str
+    label: str
+    higher_is_better: bool
+
+
+# Metrics to render — one panel per entry, laid out 2 rows × 4 cols. The
+# row groupings cluster semantically related metrics (Spearman together,
+# contact together, RSSD together) so the figure reads top-to-bottom as
+# "rank correlation / graph quality / geometric error".
+#
+# The keys here MUST match what ``aggregate_slices`` writes:
+#   - ``spearman_mean_of_medians`` — LUNA paper Fig. 3 headline.
+#   - ``spearman_mean_of_means``   — companion aggregation.
+#   - ``{precision,recall,f1}_mean`` — mean across slices.
+#   - ``{absolute,mean,sum}_rssd_mean`` — mean across slices.
+METRICS: list[MetricSpec] = [
+    MetricSpec("spearman_mean_of_medians", "Spearman (mean of medians)", True),
+    MetricSpec("spearman_mean_of_means",   "Spearman (mean of means)",   True),
+    MetricSpec("precision_mean",           "Contact precision",          True),
+    MetricSpec("recall_mean",              "Contact recall",             True),
+    MetricSpec("f1_mean",                  "Contact F1",                 True),
+    MetricSpec("absolute_rssd_mean",       "Absolute RSSD",              False),
+    MetricSpec("mean_rssd_mean",           "Mean RSSD (per cell class)", False),
+    MetricSpec("sum_rssd_mean",            "Sum RSSD (per cell class)",  False),
+]
+
+# 2 rows × 4 cols grid. Change to (1, 8) for a single-row strip or
+# (4, 2) for a tall narrow layout; the figure-sizing math below
+# auto-adapts.
+GRID_ROWS = 2
+GRID_COLS = 4
+assert GRID_ROWS * GRID_COLS >= len(METRICS), \
+    f"GRID_ROWS*GRID_COLS={GRID_ROWS*GRID_COLS} < len(METRICS)={len(METRICS)}"
 
 # Display name + colour per method. Order in this dict = top-to-bottom
 # order on the y-axis (top row plotted first). G2T on top because it's
@@ -118,16 +174,18 @@ def _discover_luna_timestamps(root: Path) -> list[str]:
     """Return all immediate-subdir basenames matching YYYYMMDD_HHMMSS.
 
     Sorted lexicographically so the seed→run mapping is stable across
-    re-runs of this script. Raises if the directory doesn't exist or
-    contains no matching subdirs (better to fail loudly than silently
-    plot an empty bar).
+    re-runs. Raises if the directory doesn't exist or contains no
+    matching subdirs (better to fail loudly than silently plot empty).
     """
     if not root.exists():
         raise FileNotFoundError(
             f"LUNA inference root not found: {root}. "
             f"Either no runs exist yet or the artifacts path moved."
         )
-    timestamps = sorted(p.name for p in root.iterdir() if p.is_dir() and _TS_RE.match(p.name))
+    timestamps = sorted(
+        p.name for p in root.iterdir()
+        if p.is_dir() and _TS_RE.match(p.name)
+    )
     if not timestamps:
         raise RuntimeError(
             f"No YYYYMMDD_HHMMSS subdirectories found under {root}. "
@@ -136,28 +194,27 @@ def _discover_luna_timestamps(root: Path) -> list[str]:
     return timestamps
 
 
-def _load_metric(metrics_csv: Path, metric: str) -> float:
-    """Read one row's metric value from a pipeline metrics.csv.
+def _load_extended_row(extended_csv: Path) -> pd.Series:
+    """Read the single-row extended_metrics.csv into a Series.
 
-    metrics.csv is the single-row summary written by run_*_pipeline.py;
-    each method's pipeline writes the same schema so the read pattern
-    is shared. Raises with the offending path on any failure mode
-    (missing file, missing column, multi-row file) so partial-run
-    artifacts don't silently degrade the plot.
+    Raises with the offending path on any failure mode (missing file,
+    multi-row file) so partial-run artifacts don't silently degrade
+    the plot. Missing METRIC columns are tolerated here — the plot
+    layer handles per-panel NaNs by drawing 'n/a'.
     """
-    if not metrics_csv.exists():
-        raise FileNotFoundError(f"metrics.csv missing: {metrics_csv}")
-    df = pd.read_csv(metrics_csv)
-    if metric not in df.columns:
-        raise KeyError(
-            f"Column {metric!r} not in {metrics_csv} "
-            f"(columns: {list(df.columns)})"
+    if not extended_csv.exists():
+        raise FileNotFoundError(
+            f"{EXTENDED_METRICS_FILENAME} missing: {extended_csv}. "
+            f"Run compute_extended_metrics.py first for the matching "
+            f"timestamps."
         )
+    df = pd.read_csv(extended_csv)
     if len(df) != 1:
         raise ValueError(
-            f"Expected single-row metrics.csv, got {len(df)} rows at {metrics_csv}"
+            f"Expected single-row {EXTENDED_METRICS_FILENAME}, got "
+            f"{len(df)} rows at {extended_csv}"
         )
-    return float(df[metric].iloc[0])
+    return df.iloc[0]
 
 
 def _collect(
@@ -165,12 +222,24 @@ def _collect(
     inference_root: Path,
     timestamps: list[str],
 ) -> pd.DataFrame:
-    """Build a tidy DataFrame: one row per (method, timestamp, value)."""
-    rows = []
+    """Long-form DataFrame: one row per (method, timestamp, metric, value).
+
+    Loads each timestamp's extended_metrics.csv once, then unpacks all
+    METRICS columns. Missing columns become NaN so the plot can still
+    render the panels for metrics that DO have data.
+    """
+    rows: list[dict] = []
     for ts in timestamps:
-        csv_path = inference_root / ts / "metrics.csv"
-        value = _load_metric(csv_path, METRIC_COL)
-        rows.append({"method": method, "timestamp": ts, "value": value})
+        csv_path = inference_root / ts / EXTENDED_METRICS_FILENAME
+        row = _load_extended_row(csv_path)
+        for spec in METRICS:
+            value = float(row[spec.column]) if spec.column in row.index else float("nan")
+            rows.append({
+                "method": method,
+                "timestamp": ts,
+                "metric": spec.column,
+                "value": value,
+            })
     return pd.DataFrame(rows)
 
 
@@ -178,15 +247,24 @@ def _collect(
 # Plot
 # ──────────────────────────────────────────────────────────────────────
 
-def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
-    """Bars + SEM + jittered dots, mirroring the notebook's AUC panel.
+def plot_panel(
+    ax,
+    df_metric: pd.DataFrame,
+    methods: list[str],
+    spec: MetricSpec,
+    show_ylabels: bool = True,
+) -> None:
+    """Render one metric's panel: bars + SEM + jittered dots + annotations.
 
-    df has columns method/timestamp/value. ``methods`` controls the
-    y-order (top→bottom).
+    ``df_metric`` has columns method/timestamp/value, ALREADY filtered
+    to a single metric. ``methods`` controls the y-order (top→bottom).
     """
     y = np.arange(len(methods))
 
-    by_method = {m: df.loc[df["method"] == m, "value"].dropna().values for m in methods}
+    by_method = {
+        m: df_metric.loc[df_metric["method"] == m, "value"].dropna().values
+        for m in methods
+    }
     means = {m: float(np.mean(v)) if len(v) else np.nan for m, v in by_method.items()}
     sems = {
         m: float(np.std(v, ddof=1) / np.sqrt(len(v))) if len(v) > 1 else 0.0
@@ -205,21 +283,17 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
             continue
 
         color = METHODS[method]
-        # Bar (mean)
         ax.barh(
             i, means[method], height=0.7,
             color=color, edgecolor=color,
             linewidth=0.5, alpha=0.35, zorder=2,
         )
-        # Error bar (SEM) — only if more than one seed
         if len(vals) > 1:
             ax.errorbar(
                 means[method], i, xerr=sems[method],
                 fmt="none", ecolor="0.3", elinewidth=0.5,
                 capsize=1.2, capthick=0.5, zorder=3,
             )
-        # Individual seed dots, light vertical jitter so overlaps
-        # are still readable
         rng = np.random.default_rng(42 + i)
         yj = rng.uniform(-0.12, 0.12, size=len(vals))
         ax.scatter(
@@ -228,35 +302,38 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
         )
 
     # ── Right-side annotations: per-method mean (± SEM) + a "+X.X% vs
-    # <other>" tag on the best method so readers can read off the
-    # headline number AND the gap to the runner-up without doing
-    # mental arithmetic from the bar length.
-    #
-    # "Best" is decided strictly by mean: higher = better when
-    # METRIC_HIGHER_IS_BETTER is True, lower = better otherwise. The
-    # gap is always reported as a positive percentage of the
-    # second-best method's mean — i.e. how much *better* the winner
-    # is, never a negative number. (If the metric is symmetric around
-    # zero, e.g. a signed enrichment score, swap to abs-based scoring;
-    # not needed here since Spearman lives in [-1, 1] with a clear
-    # higher-is-better direction.)
+    # <other>" tag on the best method. "Best" is decided strictly by
+    # mean: higher = better when spec.higher_is_better is True, lower =
+    # better otherwise. The gap is always reported as a POSITIVE
+    # percentage of the second-best method's mean — i.e. how much
+    # *better* the winner is, never a negative number.
     valid_means = {m: means[m] for m in methods if not np.isnan(means[m])}
     if len(valid_means) >= 2:
         ranked = sorted(
             valid_means.items(),
-            key=lambda kv: -kv[1] if METRIC_HIGHER_IS_BETTER else kv[1],
+            key=lambda kv: -kv[1] if spec.higher_is_better else kv[1],
         )
         best_method, best_val = ranked[0]
         second_method, second_val = ranked[1]
         denom = abs(second_val) if second_val != 0 else float("nan")
-        if METRIC_HIGHER_IS_BETTER:
+        if spec.higher_is_better:
             pct_change = (best_val - second_val) / denom * 100.0
         else:
             pct_change = (second_val - best_val) / denom * 100.0
     else:
         best_method = None
-        pct_change = None
         second_method = None
+        pct_change = None
+
+    # Format helper: pick decimals based on the magnitude of the value
+    # so we get "0.463" for Spearman/F1 but "12.4" for RSSD without
+    # hand-tuning per metric.
+    def _fmt(v: float) -> str:
+        if abs(v) >= 100:
+            return f"{v:.1f}"
+        if abs(v) >= 10:
+            return f"{v:.2f}"
+        return f"{v:.3f}"
 
     for i, method in enumerate(methods):
         m_val = means.get(method, np.nan)
@@ -264,17 +341,12 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
             continue
         n_seeds = len(by_method[method])
         if n_seeds > 1:
-            label = f"{m_val:.3f} ± {sems[method]:.3f}"
+            label = f"{_fmt(m_val)} ± {_fmt(sems[method])}"
         else:
-            label = f"{m_val:.3f}"
+            label = _fmt(m_val)
         if method == best_method and pct_change is not None:
-            arrow = "↑" if METRIC_HIGHER_IS_BETTER else "↓"
+            arrow = "↑" if spec.higher_is_better else "↓"
             label = f"{label}  ({pct_change:+.1f}% {arrow} vs {second_method})"
-        # Anchor at the bar tip (mean value), then nudge right by a
-        # small data-space offset so the text doesn't kiss the bar.
-        # ``clip_on=False`` because the longest tag (the best-method
-        # one) is intentionally allowed to push past the panel's
-        # right xlim into the figure margin.
         ax.text(
             m_val, i, "  " + label,
             va="center", ha="left",
@@ -284,7 +356,10 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
         )
 
     ax.set_yticks(y)
-    ax.set_yticklabels(methods, fontweight="medium")
+    if show_ylabels:
+        ax.set_yticklabels(methods, fontweight="medium")
+    else:
+        ax.set_yticklabels([])
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -297,16 +372,39 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
     ax.tick_params(axis="y", length=0)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=3, integer=False))
 
-    ax.set_title("MMC cortex", fontsize=6, fontweight="medium", pad=3)
+    arrow = "↑" if spec.higher_is_better else "↓"
+    ax.set_title(
+        f"{spec.label} ({arrow})",
+        fontsize=6.5, fontweight="medium", pad=3,
+    )
+
+
+def _set_panel_xlim(ax, df_metric: pd.DataFrame, spec: MetricSpec) -> None:
+    """Set the bar-region xlim per panel so different metric scales
+    (Spearman in [0,1] vs RSSD in [10, 100]) each get tight, readable
+    panels. The annotation text overflows past xlim into the figure
+    margin reserved by ``annotation_room`` (clip_on=False).
+    """
+    valid = df_metric["value"].dropna().values
+    if len(valid) == 0:
+        return
+    lo = float(valid.min())
+    hi = float(valid.max())
+    span = hi - lo if hi > lo else max(abs(hi), 1e-6)
+    # Tight padding on the left; smaller on the right (the annotation
+    # text lives outside the data area, in the reserved margin).
+    pad = span * 0.05
+    if spec.column.startswith("spearman_") or spec.column.endswith("_mean"):
+        # For bounded-[0,1]-ish metrics, anchor xlim to 0 on the left
+        # so bar lengths are visually comparable to the "no signal"
+        # baseline. RSSD doesn't have that interpretation so we let it
+        # float to data range.
+        if spec.column.startswith(("spearman_", "precision_", "recall_", "f1_")):
+            lo = min(lo, 0.0)
+    ax.set_xlim(lo - pad, hi + pad)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """CLI surface. The only knob right now is ``--scgg_timestamps``;
-    LUNA timestamps stay auto-discovered. Keeping argparse here (vs.
-    using ``sys.argv`` directly) leaves room to grow the surface
-    later (e.g. ``--metric``, ``--dataset``, ``--out_dir``) without
-    rewriting the entry point.
-    """
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -315,46 +413,51 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--scgg_timestamps",
         default=None,
         help=(
-            "Comma-separated list of YYYYMMDD_HHMMSS run timestamps "
-            "to load from scgg_inference/ for the G2T method. "
-            "Overrides the hardcoded DEFAULT_SCGG_TIMESTAMPS in the "
-            "script. Each timestamp must be an existing subdir of "
-            f"{SCGG_INFERENCE_ROOT} containing a metrics.csv. "
-            "Example: --scgg_timestamps "
-            "20260530_133432,20260530_133426,20260530_133419,"
-            "20260530_133412,20260530_093440"
+            "Comma-separated YYYYMMDD_HHMMSS timestamps to load from "
+            "scgg_inference/ for G2T. Overrides DEFAULT_SCGG_TIMESTAMPS. "
+            "Each timestamp must contain extended_metrics.csv "
+            "(produced by compute_extended_metrics.py)."
+        ),
+    )
+    p.add_argument(
+        "--luna_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps to load from "
+            "luna_inference/ for LUNA. When omitted, auto-discovers "
+            "every matching subdir under LUNA_INFERENCE_ROOT."
         ),
     )
     return p.parse_args(argv)
 
 
+def _parse_ts_list(s: str | None) -> list[str] | None:
+    if s is None:
+        return None
+    items = [t.strip() for t in s.split(",") if t.strip()]
+    if not items:
+        raise ValueError("timestamp list parsed to empty")
+    for ts in items:
+        if not _TS_RE.match(ts):
+            raise ValueError(
+                f"timestamp {ts!r} does not match YYYYMMDD_HHMMSS[_suffix]"
+            )
+    return items
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    if args.scgg_timestamps:
-        scgg_timestamps = [s.strip() for s in args.scgg_timestamps.split(",") if s.strip()]
-        if not scgg_timestamps:
-            raise ValueError(
-                "--scgg_timestamps was provided but parsed to an empty list. "
-                "Pass at least one YYYYMMDD_HHMMSS entry."
-            )
-        # Fail loudly on malformed timestamps so a typo doesn't silently
-        # become a 'file not found' downstream.
-        for ts in scgg_timestamps:
-            if not _TS_RE.match(ts):
-                raise ValueError(
-                    f"--scgg_timestamps entry {ts!r} does not match "
-                    f"YYYYMMDD_HHMMSS[_suffix]."
-                )
-    else:
-        scgg_timestamps = list(DEFAULT_SCGG_TIMESTAMPS)
+    scgg_timestamps = _parse_ts_list(args.scgg_timestamps) or list(DEFAULT_SCGG_TIMESTAMPS)
+    luna_timestamps = (
+        _parse_ts_list(args.luna_timestamps)
+        or _discover_luna_timestamps(LUNA_INFERENCE_ROOT)
+    )
 
-    # ── Discover / load ────────────────────────────────────────────────
-    luna_timestamps = _discover_luna_timestamps(LUNA_INFERENCE_ROOT)
-    print(f"[plot_spearman] LUNA timestamps ({len(luna_timestamps)}):")
+    print(f"[plot_metrics] LUNA timestamps ({len(luna_timestamps)}):")
     for ts in luna_timestamps:
         print(f"    {ts}")
-    print(f"[plot_spearman] G2T (scgg) timestamps ({len(scgg_timestamps)}):")
+    print(f"[plot_metrics] G2T (scgg) timestamps ({len(scgg_timestamps)}):")
     for ts in scgg_timestamps:
         print(f"    {ts}")
 
@@ -363,69 +466,77 @@ def main(argv: list[str] | None = None) -> int:
     df = pd.concat([g2t_df, luna_df], ignore_index=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    processed_path = OUT_DIR / "g2t_vs_luna_spearman_processed.csv"
+    processed_path = OUT_DIR / "g2t_vs_luna_extended_metrics_processed.csv"
     df.to_csv(processed_path, index=False)
-    print(f"[plot_spearman] saved processed CSV → {processed_path}")
+    print(f"[plot_metrics] saved processed CSV → {processed_path}")
 
-    # Quick numeric summary to stdout — useful in LSF logs.
+    # Numeric summary per metric — useful in LSF logs for quick sanity-check.
+    print("[plot_metrics] summary:")
     summary = (
-        df.groupby("method")["value"]
-          .agg(["mean", "std", "count", "min", "max"])
-          .reindex(list(METHODS.keys()))
+        df.groupby(["metric", "method"])["value"]
+          .agg(["mean", "std", "count"])
+          .unstack("method")
     )
-    print("[plot_spearman] summary:")
     print(summary.to_string(float_format=lambda x: f"{x:.4f}"))
 
     # ── Figure ─────────────────────────────────────────────────────────
     methods = list(METHODS.keys())
     n_methods = len(methods)
 
-    # Single panel, sized to roughly match one panel of the multi-panel
-    # template figures so the aesthetic is consistent. Panel + figure
-    # widened from the notebook's 18 mm because (a) there are only two
-    # rows so we have room, and (b) the right-side annotations
-    # ("0.463 ± 0.012  (+3.2% ↑ vs LUNA)") need horizontal space.
+    # Per-panel sizes — same constants as the single-panel version so
+    # individual panels look identical. Whole figure is GRID_COLS wide
+    # and GRID_ROWS tall, with annotation room on the right of every
+    # panel (the annotation text uses clip_on=False so it can spill
+    # rightward into the next column's space — but we keep wspace
+    # generous so it doesn't actually collide).
     panel_width = 42 * mm
-    annotation_room = 38 * mm   # extra figure width reserved for the
-                                # right-side mean / pct-change labels;
-                                # the text is plotted with clip_on=False
-                                # so it can extend into this margin
-                                # without the bars themselves shrinking.
-    row_height = 0.18           # taller than notebook (0.12) because we
-                                # only have 2 rows so the figure would
-                                # otherwise be uncomfortably squat
-    fig_height = n_methods * row_height + 0.45
-    fig_width = panel_width + annotation_room + 0.65
+    annotation_room = 38 * mm
+    row_height = 0.22                    # taller than the single-panel
+                                         # version (0.18) because the
+                                         # panel TITLE adds a line
+    fig_width = (panel_width + annotation_room) * GRID_COLS + 0.85
+    fig_height = (n_methods * row_height + 0.55) * GRID_ROWS + 0.45
 
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig, axes = plt.subplots(
+        GRID_ROWS, GRID_COLS,
+        figsize=(fig_width, fig_height),
+        sharey=True,
+    )
+    # Flatten for easy iteration regardless of GRID_ROWS/COLS shape.
+    axes_flat = np.atleast_1d(axes).flatten()
 
-    plot_panel(ax, df, methods)
+    for idx, spec in enumerate(METRICS):
+        ax = axes_flat[idx]
+        col, row = idx % GRID_COLS, idx // GRID_COLS
+        df_metric = df.loc[df["metric"] == spec.column].copy()
+        plot_panel(ax, df_metric, methods, spec, show_ylabels=(col == 0))
+        _set_panel_xlim(ax, df_metric, spec)
 
-    # X-limits: the BAR REGION stays tight around the observed range
-    # (always including the (0,1) span Spearman lives in so the bar's
-    # relation to "0 = no correlation" stays interpretable). The
-    # annotation text overflows past the right xlim into the figure
-    # margin reserved by ``annotation_room`` above.
-    valid = df["value"].dropna().values
-    lo = min(valid.min(), 0.0)
-    hi = max(valid.max(), 1.0)
-    pad = (hi - lo) * 0.05
-    ax.set_xlim(lo - pad, hi + pad)
+    # Hide any leftover axes (if METRICS doesn't exactly fill the grid).
+    for k in range(len(METRICS), len(axes_flat)):
+        axes_flat[k].set_visible(False)
 
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.35)
+    # Bottom margin sized so the per-method colour legend (drawn next)
+    # doesn't overlap the bottom row's tick labels.
+    plt.subplots_adjust(wspace=0.55, hspace=0.55, bottom=0.10)
 
-    arrow = r" ($\uparrow$)" if METRIC_HIGHER_IS_BETTER else r" ($\downarrow$)"
+    # Single shared figure footer caption: identify the dataset + the
+    # number of seeds powering each method's bars.
+    n_g2t = df.loc[df["method"] == "G2T", "timestamp"].nunique()
+    n_luna = df.loc[df["method"] == "LUNA", "timestamp"].nunique()
     fig.text(
-        0.5, 0.07,
-        METRIC_LABEL + arrow,
-        ha="center", va="center", fontsize=7, fontweight="medium",
+        0.5, 0.03,
+        f"MMC cortex — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds). "
+        f"Bar = mean across seeds, error bar = SEM, dots = individual seeds.",
+        ha="center", va="center", fontsize=6.5, fontweight="medium",
     )
 
+    out_stem = "g2t_vs_luna_extended_metrics"
     for ext in ("svg", "pdf", "png"):
-        out_path = OUT_DIR / f"g2t_vs_luna_spearman.{ext}"
+        out_path = OUT_DIR / f"{out_stem}.{ext}"
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)
-        print(f"[plot_spearman] saved → {out_path}")
+        print(f"[plot_metrics] saved → {out_path}")
     plt.close(fig)
     return 0
 
