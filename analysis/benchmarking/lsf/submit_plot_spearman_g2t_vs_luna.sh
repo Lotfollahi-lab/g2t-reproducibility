@@ -12,7 +12,16 @@
 # normal-queue defaults.
 #
 # Usage:
-#     bash submit_plot_spearman_g2t_vs_luna.sh [--dry_run]
+#     bash submit_plot_spearman_g2t_vs_luna.sh [--dry_run] \
+#         [--scgg_timestamps ts1,ts2,ts3,ts4,ts5]
+#
+# Options:
+#   --dry_run                Print the bsub command without submitting.
+#   --scgg_timestamps LIST   Comma-separated YYYYMMDD_HHMMSS timestamps
+#                            to load from scgg_inference/ for the G2T
+#                            method. Forwarded verbatim to the python
+#                            script's --scgg_timestamps flag. Defaults
+#                            to the hardcoded list in the .py.
 #
 # The output figure (svg + pdf + png) and the processed CSV land in:
 #     /nfs/team361/sb75/scgg-reproducibility/artifacts/
@@ -46,9 +55,23 @@
 set -euo pipefail
 
 DRY_RUN=0
-if [[ "${1:-}" == "--dry_run" ]]; then
-    DRY_RUN=1
-fi
+SCGG_TIMESTAMPS=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry_run)
+            DRY_RUN=1; shift ;;
+        --scgg_timestamps)
+            SCGG_TIMESTAMPS="${2:?--scgg_timestamps requires a value}"; shift 2 ;;
+        --help|-h)
+            # Print the docstring (top comment block) up to the first non-comment line.
+            awk 'NR>1 && /^[^#]/{exit} {print}' "$0"
+            exit 0 ;;
+        *)
+            echo "ERROR: unknown arg: $1" >&2
+            echo "Run with --help for usage." >&2
+            exit 2 ;;
+    esac
+done
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPRO_ROOT="$( cd -- "$SCRIPT_DIR/../../.." &> /dev/null && pwd )"
@@ -85,7 +108,11 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     echo "set -euo pipefail"
     echo
     printf 'source %q\n' "$VENV_PATH/bin/activate"
-    printf 'exec python %q\n' "$PLOT_SCRIPT"
+    if [[ -n "$SCGG_TIMESTAMPS" ]]; then
+        printf 'exec python %q --scgg_timestamps %q\n' "$PLOT_SCRIPT" "$SCGG_TIMESTAMPS"
+    else
+        printf 'exec python %q\n' "$PLOT_SCRIPT"
+    fi
 } > "$JOB_SCRIPT"
 chmod +x "$JOB_SCRIPT"
 
@@ -99,6 +126,7 @@ echo "group         : $LSF_GROUP_FINAL"
 echo "out dir       : $OUT_DIR"
 echo "log dir       : $LOG_DIR"
 echo "job script    : $JOB_SCRIPT"
+[[ -n "$SCGG_TIMESTAMPS" ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 echo "dry run       : $DRY_RUN"
 echo "================================================================"
 

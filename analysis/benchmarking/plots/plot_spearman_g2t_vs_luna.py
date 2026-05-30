@@ -30,6 +30,7 @@ which fires it on the ``normal`` queue with 4GB / 1 core / 10min.
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sys
@@ -52,14 +53,17 @@ DATASET = "mmc_luna"
 LUNA_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "luna_inference"
 SCGG_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "scgg_inference"
 
-# G2T (scGG) seeds — hardcoded because the inference tree contains more
-# than five runs and the user picks the canonical five by timestamp.
-SCGG_TIMESTAMPS = [
+# G2T (scGG) seeds — DEFAULT picks the canonical five by timestamp
+# because the scgg_inference tree contains more than five runs and we
+# need to pin which five form the published comparison. Override via
+# ``--scgg_timestamps ts1,ts2,...`` on the CLI (see __main__ block);
+# pass anything from 1 to N comma-separated timestamps.
+DEFAULT_SCGG_TIMESTAMPS = [
     "20260530_133432",
     "20260530_133426",
     "20260530_133419",
     "20260530_133412",
-    "20260530_133954",
+    "20260530_093440",
 ]
 
 OUT_DIR = ARTIFACTS_ROOT / DATASET / "comparison_plots"
@@ -240,18 +244,66 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
     ax.set_title("MMC cortex", fontsize=6, fontweight="medium", pad=3)
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """CLI surface. The only knob right now is ``--scgg_timestamps``;
+    LUNA timestamps stay auto-discovered. Keeping argparse here (vs.
+    using ``sys.argv`` directly) leaves room to grow the surface
+    later (e.g. ``--metric``, ``--dataset``, ``--out_dir``) without
+    rewriting the entry point.
+    """
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--scgg_timestamps",
+        default=None,
+        help=(
+            "Comma-separated list of YYYYMMDD_HHMMSS run timestamps "
+            "to load from scgg_inference/ for the G2T method. "
+            "Overrides the hardcoded DEFAULT_SCGG_TIMESTAMPS in the "
+            "script. Each timestamp must be an existing subdir of "
+            f"{SCGG_INFERENCE_ROOT} containing a metrics.csv. "
+            "Example: --scgg_timestamps "
+            "20260530_133432,20260530_133426,20260530_133419,"
+            "20260530_133412,20260530_093440"
+        ),
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+
+    if args.scgg_timestamps:
+        scgg_timestamps = [s.strip() for s in args.scgg_timestamps.split(",") if s.strip()]
+        if not scgg_timestamps:
+            raise ValueError(
+                "--scgg_timestamps was provided but parsed to an empty list. "
+                "Pass at least one YYYYMMDD_HHMMSS entry."
+            )
+        # Fail loudly on malformed timestamps so a typo doesn't silently
+        # become a 'file not found' downstream.
+        for ts in scgg_timestamps:
+            if not _TS_RE.match(ts):
+                raise ValueError(
+                    f"--scgg_timestamps entry {ts!r} does not match "
+                    f"YYYYMMDD_HHMMSS[_suffix]."
+                )
+    else:
+        scgg_timestamps = list(DEFAULT_SCGG_TIMESTAMPS)
+
     # ── Discover / load ────────────────────────────────────────────────
     luna_timestamps = _discover_luna_timestamps(LUNA_INFERENCE_ROOT)
     print(f"[plot_spearman] LUNA timestamps ({len(luna_timestamps)}):")
     for ts in luna_timestamps:
         print(f"    {ts}")
-    print(f"[plot_spearman] G2T (scgg) timestamps ({len(SCGG_TIMESTAMPS)}):")
-    for ts in SCGG_TIMESTAMPS:
+    print(f"[plot_spearman] G2T (scgg) timestamps ({len(scgg_timestamps)}):")
+    for ts in scgg_timestamps:
         print(f"    {ts}")
 
     luna_df = _collect("LUNA", LUNA_INFERENCE_ROOT, luna_timestamps)
-    g2t_df = _collect("G2T", SCGG_INFERENCE_ROOT, SCGG_TIMESTAMPS)
+    g2t_df = _collect("G2T", SCGG_INFERENCE_ROOT, scgg_timestamps)
     df = pd.concat([g2t_df, luna_df], ignore_index=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
