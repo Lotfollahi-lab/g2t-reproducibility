@@ -212,6 +212,7 @@ WANDB_MODE=""
 EMBEDDING_FIELD=""
 SKIP_TRAINING=""
 CHECKPOINT=""
+EXCLUDE_TEST_FILES=""
 
 QUEUE_ARG=""
 GROUP_ARG="$LSF_GROUP_DEFAULT"
@@ -266,6 +267,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_TRAINING=1; shift ;;
         --checkpoint)
             CHECKPOINT="${2:?--checkpoint requires a value}"; shift 2 ;;
+        --exclude_test_files)
+            EXCLUDE_TEST_FILES="${2:?--exclude_test_files requires a value}"; shift 2 ;;
         --queue|-q)
             QUEUE_ARG="${2:?--queue requires a value}"; shift 2 ;;
         --group|-g)
@@ -462,6 +465,7 @@ echo "wandb_run     : $RUN_NAME"
 [[ -n "$EMBEDDING_FIELD" ]] && echo "embedding_field : $EMBEDDING_FIELD"
 [[ -n "$SKIP_TRAINING" ]] && echo "skip_training : 1 (inference-only)"
 [[ -n "$CHECKPOINT" ]] && echo "checkpoint    : $CHECKPOINT"
+[[ -n "$EXCLUDE_TEST_FILES" ]] && echo "exclude_test_files : $EXCLUDE_TEST_FILES"
 echo "----------------------------------------------------------------"
 echo "repo          : $SCGG_REPO_FINAL"
 echo "venv          : $VENV_PATH"
@@ -528,6 +532,7 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     # will reject the flag if added later there.
     printf 'export SCGG_SKIP_TRAINING=%q\n'      "$SKIP_TRAINING"
     printf 'export SCGG_CHECKPOINT=%q\n'         "$CHECKPOINT"
+    printf 'export SCGG_EXCLUDE_TEST_FILES=%q\n' "$EXCLUDE_TEST_FILES"
     # Also forward the artifacts root so the runner / pipeline reads
     # the same place the submitter wrote logs to.
     printf 'export SCGG_ARTIFACTS_ROOT=%q\n'     "$ARTIFACTS_ROOT"

@@ -41,6 +41,10 @@
 #   SCGG_CHECKPOINT           paired with SCGG_SKIP_TRAINING — the .ckpt
 #                             the pipeline reuses instead of training a
 #                             fresh model (luna only)
+#   SCGG_EXCLUDE_TEST_FILES   comma-separated *_test.h5ad basenames to
+#                             drop from the assembled test set (luna
+#                             only). Useful for skipping too-large
+#                             slices that GPU-OOM during inference.
 #
 # The runner activates the venv, switches to the repo root, and execs
 # the appropriate ``run_<method>_pipeline.py`` with the assembled args.
@@ -167,6 +171,12 @@ if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_SKIP_TRAINING:-}" ]]; then
 fi
 if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_CHECKPOINT:-}" ]]; then
     ARGS+=(--checkpoint "$SCGG_CHECKPOINT")
+fi
+# Per-file test-set exclusion (currently only consumed by the LUNA
+# pipeline → run_luna_inference → run_benchmark, which filters
+# *_test.h5ad files by basename before building test.csv).
+if [[ "$METHOD" == "luna" ]] && [[ -n "${SCGG_EXCLUDE_TEST_FILES:-}" ]]; then
+    ARGS+=(--exclude_test_files "$SCGG_EXCLUDE_TEST_FILES")
 fi
 
 # Override strings — split on whitespace into multiple args. The user
