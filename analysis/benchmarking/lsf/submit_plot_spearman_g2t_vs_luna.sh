@@ -12,11 +12,15 @@
 # by the computation step; if those files already exist (from a prior
 # run) you can skip recomputation with ``--skip_compute``.
 #
-# Sized for the normal queue (no GPU, 8 GB, 1 core, 30 min wall). The
-# computation step is the bulk of the wall-clock — Spearman on the
-# full N×N pairwise distance matrix per slice scales O(N²) and the
-# MMC cortex has 30+ slices ≲ 5k cells each. Still finishes in
-# seconds-to-minutes; bump --wall if you point this at CNS-scale data.
+# Sized for the normal queue (no GPU, 32 GB, 1 core, 12 h wall). The
+# computation step is the bulk of the wall-clock — for each slice
+# we build TWO N×N pairwise distance matrices (true + predicted),
+# then run scipy.stats.spearmanr per cell over the N-long rows;
+# that's O(N² log N) per slice in Python and adds up fast across
+# 30+ MMC slices × 10 timestamps (5 LUNA + 5 G2T) seeds. The 30 min
+# default we shipped first was too tight; bumped to 12 h, which
+# comfortably covers MMC and leaves headroom for CNS slices.
+# Override with the --wall flag below.
 #
 # Usage:
 #     bash submit_plot_spearman_g2t_vs_luna.sh [OPTIONS]
@@ -36,6 +40,11 @@
 #   --luna_timestamps LIST   Comma-separated YYYYMMDD_HHMMSS timestamps
 #                            to load from luna_inference/. Defaults to
 #                            auto-discovery (every matching subdir).
+#   --wall HH:MM             LSF wall-clock cap. Default: 12:00 (12 h).
+#                            Drop to 00:30 if you've already run with
+#                            --skip_compute and just want a fast
+#                            re-plot.
+#   --mem MB                 LSF memory cap in MB. Default: 32000 (32 GB).
 #
 # The figure (svg + pdf + png), the tidy long-form processed CSV, and
 # the LSF logs all land under:
@@ -79,6 +88,8 @@ DRY_RUN=0
 SKIP_COMPUTE=0
 SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
+WALL_ARG=""
+MEM_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry_run)
@@ -89,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             SCGG_TIMESTAMPS="${2:?--scgg_timestamps requires a value}"; shift 2 ;;
         --luna_timestamps)
             LUNA_TIMESTAMPS="${2:?--luna_timestamps requires a value}"; shift 2 ;;
+        --wall)
+            WALL_ARG="${2:?--wall requires a value, e.g. 24:00}"; shift 2 ;;
+        --mem)
+            MEM_ARG="${2:?--mem requires a value in MB}"; shift 2 ;;
         --help|-h)
             # Print the docstring (top comment block) up to the first non-comment line.
             awk 'NR>1 && /^[^#]/{exit} {print}' "$0"
@@ -99,6 +114,14 @@ while [[ $# -gt 0 ]]; do
             exit 2 ;;
     esac
 done
+
+# Default wall-clock + memory caps. Bumped 2026-05-30 from 00:30 /
+# 8000 MB after the first MMC submission hit the wall-clock limit:
+# the Spearman-per-cell loop over O(N²) distance matrices is slow in
+# pure-Python (no vectorisation across cells in scipy.stats.spearmanr).
+# Override per-submission with --wall / --mem.
+WALL_FINAL="${WALL_ARG:-12:00}"
+MEM_FINAL="${MEM_ARG:-32000}"
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 REPRO_ROOT="$( cd -- "$SCRIPT_DIR/../../.." &> /dev/null && pwd )"
@@ -183,6 +206,8 @@ echo "job script      : $JOB_SCRIPT"
 echo "skip compute    : $SKIP_COMPUTE"
 [[ -n "$SCGG_TIMESTAMPS" ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 [[ -n "$LUNA_TIMESTAMPS" ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
+echo "wall            : $WALL_FINAL"
+echo "mem (MB)        : $MEM_FINAL"
 echo "dry run         : $DRY_RUN"
 echo "================================================================"
 
@@ -191,9 +216,9 @@ BSUB_CMD=(
     -G "$LSF_GROUP_FINAL"
     -q "$LSF_QUEUE_FINAL"
     -n 1
-    -M 8000
-    -R "select[mem>8000] rusage[mem=8000]"
-    -W "00:30"
+    -M "$MEM_FINAL"
+    -R "select[mem>$MEM_FINAL] rusage[mem=$MEM_FINAL]"
+    -W "$WALL_FINAL"
     -J "$JOB_NAME"
     -o "$LOG_OUT"
     -e "$LOG_ERR"
