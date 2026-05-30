@@ -30,7 +30,17 @@
 #                      /nfs/team361/sb75/.venvs/scgg (matches the
 #                      scgg pipeline's venv — same pandas + matplotlib).
 #     LSF_QUEUE        override the queue. Default: normal.
-#     LSF_GROUP        cost-code group. Default: $LSF_GROUP env or s10396.
+#     LSF_GROUP        cost-code group. Default: $LSF_GROUP env or team361.
+#                      NOTE: the cluster's ``normal`` queue REJECTS the
+#                      sXXXX AI-acceleration groups with
+#                      "this is not an AI acceleration queue. Please
+#                       submit with an LSF group (-G) that is a non
+#                       sXXXX project cost code group."
+#                      ``team361`` is the project cost-code group the
+#                      submitter defaults to here. The pipeline's
+#                      submit_pipeline.sh uses s10396 because it targets
+#                      training-parallel (a GPU/AI queue) — don't
+#                      cross-paste defaults between the two.
 # -----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -51,7 +61,9 @@ fi
 
 VENV_PATH="${VENV_PATH:-/nfs/team361/sb75/.venvs/scgg}"
 LSF_QUEUE_FINAL="${LSF_QUEUE:-normal}"
-LSF_GROUP_FINAL="${LSF_GROUP:-s10396}"
+# normal queue rejects sXXXX (AI-acceleration) cost-code groups; use the
+# project group instead. Set LSF_GROUP=<other> in the env to override.
+LSF_GROUP_FINAL="${LSF_GROUP:-team361}"
 
 ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
 OUT_DIR="$ARTIFACTS_ROOT/mmc_luna/comparison_plots"
