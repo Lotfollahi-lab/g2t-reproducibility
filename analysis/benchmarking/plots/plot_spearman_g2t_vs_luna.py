@@ -227,6 +227,62 @@ def plot_panel(ax, df: pd.DataFrame, methods: list[str]) -> None:
             edgecolors="white", linewidths=0.3, zorder=4, alpha=0.92,
         )
 
+    # ── Right-side annotations: per-method mean (± SEM) + a "+X.X% vs
+    # <other>" tag on the best method so readers can read off the
+    # headline number AND the gap to the runner-up without doing
+    # mental arithmetic from the bar length.
+    #
+    # "Best" is decided strictly by mean: higher = better when
+    # METRIC_HIGHER_IS_BETTER is True, lower = better otherwise. The
+    # gap is always reported as a positive percentage of the
+    # second-best method's mean — i.e. how much *better* the winner
+    # is, never a negative number. (If the metric is symmetric around
+    # zero, e.g. a signed enrichment score, swap to abs-based scoring;
+    # not needed here since Spearman lives in [-1, 1] with a clear
+    # higher-is-better direction.)
+    valid_means = {m: means[m] for m in methods if not np.isnan(means[m])}
+    if len(valid_means) >= 2:
+        ranked = sorted(
+            valid_means.items(),
+            key=lambda kv: -kv[1] if METRIC_HIGHER_IS_BETTER else kv[1],
+        )
+        best_method, best_val = ranked[0]
+        second_method, second_val = ranked[1]
+        denom = abs(second_val) if second_val != 0 else float("nan")
+        if METRIC_HIGHER_IS_BETTER:
+            pct_change = (best_val - second_val) / denom * 100.0
+        else:
+            pct_change = (second_val - best_val) / denom * 100.0
+    else:
+        best_method = None
+        pct_change = None
+        second_method = None
+
+    for i, method in enumerate(methods):
+        m_val = means.get(method, np.nan)
+        if np.isnan(m_val):
+            continue
+        n_seeds = len(by_method[method])
+        if n_seeds > 1:
+            label = f"{m_val:.3f} ± {sems[method]:.3f}"
+        else:
+            label = f"{m_val:.3f}"
+        if method == best_method and pct_change is not None:
+            arrow = "↑" if METRIC_HIGHER_IS_BETTER else "↓"
+            label = f"{label}  ({pct_change:+.1f}% {arrow} vs {second_method})"
+        # Anchor at the bar tip (mean value), then nudge right by a
+        # small data-space offset so the text doesn't kiss the bar.
+        # ``clip_on=False`` because the longest tag (the best-method
+        # one) is intentionally allowed to push past the panel's
+        # right xlim into the figure margin.
+        ax.text(
+            m_val, i, "  " + label,
+            va="center", ha="left",
+            fontsize=5.5, fontweight="medium",
+            color=METHODS[method],
+            clip_on=False,
+        )
+
     ax.set_yticks(y)
     ax.set_yticklabels(methods, fontweight="medium")
 
@@ -325,23 +381,31 @@ def main(argv: list[str] | None = None) -> int:
     n_methods = len(methods)
 
     # Single panel, sized to roughly match one panel of the multi-panel
-    # template figures so the aesthetic is consistent.
-    panel_width = 32 * mm   # a hair wider than the notebook's 18 mm
-                            # because there are only two rows and the
-                            # ticks need breathing room
-    row_height = 0.18       # taller than notebook (0.12) because we
-                            # only have 2 rows so the figure would
-                            # otherwise be uncomfortably squat
+    # template figures so the aesthetic is consistent. Panel + figure
+    # widened from the notebook's 18 mm because (a) there are only two
+    # rows so we have room, and (b) the right-side annotations
+    # ("0.463 ± 0.012  (+3.2% ↑ vs LUNA)") need horizontal space.
+    panel_width = 42 * mm
+    annotation_room = 38 * mm   # extra figure width reserved for the
+                                # right-side mean / pct-change labels;
+                                # the text is plotted with clip_on=False
+                                # so it can extend into this margin
+                                # without the bars themselves shrinking.
+    row_height = 0.18           # taller than notebook (0.12) because we
+                                # only have 2 rows so the figure would
+                                # otherwise be uncomfortably squat
     fig_height = n_methods * row_height + 0.45
-    fig_width = panel_width + 0.65
+    fig_width = panel_width + annotation_room + 0.65
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
     plot_panel(ax, df, methods)
 
-    # Per-panel x-limits: tight around observed range with padding,
-    # but always include the (0,1) span Spearman lives in so the
-    # bar's relation to "0 = no correlation" stays interpretable.
+    # X-limits: the BAR REGION stays tight around the observed range
+    # (always including the (0,1) span Spearman lives in so the bar's
+    # relation to "0 = no correlation" stays interpretable). The
+    # annotation text overflows past the right xlim into the figure
+    # margin reserved by ``annotation_room`` above.
     valid = df["value"].dropna().values
     lo = min(valid.min(), 0.0)
     hi = max(valid.max(), 1.0)
