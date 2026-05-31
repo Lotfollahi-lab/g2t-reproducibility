@@ -91,9 +91,25 @@ log "installing torch (CPU build) ==$TORCH_VERSION ..."
 "${UV_PIP[@]}" --index-url https://download.pytorch.org/whl/cpu \
     "torch==${TORCH_VERSION}"
 
+# Install scikit-learn BEFORE CeLEry. Reason: CeLEryPy's setup.py
+# declares the deprecated ``sklearn`` PyPI shim as a dependency, not
+# the modern ``scikit-learn`` name. The shim package's own setup.py
+# refuses to install (it just prints "use scikit-learn instead")
+# UNLESS the SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True
+# env var is set at install time. We set that env var below for the
+# CeLEry install AND pre-install scikit-learn here so the shim's
+# transitive resolution finds an already-installed scikit-learn
+# instead of pulling in a second copy. This is the cleanest workaround
+# until CeLEry updates its setup.py.
+log "installing scikit-learn (pre-CeLEry; works around CeLEry's deprecated sklearn shim)..."
+"${UV_PIP[@]}" "scikit-learn>=1.2"
+
 # CeLEry itself. PyPI name is ``CeLEryPy``; import as ``CeLEry``.
+# Set the deprecation-bypass env var so the sklearn-pypi-package
+# shim that CeLEry depends on can install.
 log "installing CeLEryPy==$CELERY_VERSION ..."
-"${UV_PIP[@]}" "CeLEryPy==${CELERY_VERSION}"
+SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True \
+    "${UV_PIP[@]}" "CeLEryPy==${CELERY_VERSION}"
 
 # Data IO + scientific stack. Same versions as the other envs so the
 # metric computation reads exactly the same h5ads.
@@ -124,12 +140,10 @@ log "installing matplotlib / pyyaml / wandb / psutil ..."
     "wandb>=0.15" \
     "psutil>=5.9"
 
-# scikit-learn — CeLEry uses it internally for some preprocessing
-# helpers; pin to a recent version that works with numpy>=1.22.
-log "installing scikit-learn ..."
-"${UV_PIP[@]}" "scikit-learn>=1.2"
-
 # tqdm — CeLEry uses it for progress bars during training.
+# (scikit-learn was installed earlier; see the CeLEry block above
+# for the deprecated-shim workaround details.)
+log "installing tqdm ..."
 "${UV_PIP[@]}" "tqdm>=4.64"
 
 # ---------------------------------------------------------------------------
