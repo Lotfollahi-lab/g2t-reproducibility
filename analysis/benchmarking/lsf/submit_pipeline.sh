@@ -11,7 +11,7 @@
 # under a single bsub command so a one-off ablation is one line.
 #
 # Usage:
-#   bash submit_pipeline.sh --method <scgg|luna|novosparc> \
+#   bash submit_pipeline.sh --method <scgg|luna|novosparc|celery> \
 #                           --wandb_run_name <NAME> \
 #                           [OPTIONS]
 #
@@ -297,8 +297,8 @@ if [[ -z "$METHOD" ]]; then
     echo "ERROR: --method is required." >&2; print_help; exit 2
 fi
 case "$METHOD" in
-    scgg|luna|novosparc) ;;
-    *) echo "ERROR: --method must be scgg|luna|novosparc; got '$METHOD'." >&2; exit 2 ;;
+    scgg|luna|novosparc|celery) ;;
+    *) echo "ERROR: --method must be scgg|luna|novosparc|celery; got '$METHOD'." >&2; exit 2 ;;
 esac
 if [[ -z "$RUN_NAME" ]]; then
     echo "ERROR: --wandb_run_name is required." >&2; exit 2
@@ -381,6 +381,25 @@ case "$METHOD" in
         DEFAULT_WALL="08:00"
         DEFAULT_GPU=""   # CPU-only; no -gpu arg
         ;;
+    celery)
+        # CeLEry does not call .to(device) in its public API and is
+        # effectively CPU-only — see notes in setup_celery_env.sh.
+        # Bigger MEM default than novosparc because CeLEry trains
+        # N independent MLPs (one per test slice), so the working
+        # set of in-memory AnnData copies adds up; with 31 MMC
+        # test slices × ~5k cells × ~258 genes the RSS peak is
+        # well under 32 GB. Bumped to 64 GB to give a safety margin.
+        # Wall: per-slice training is ~3-5 min on CPU (500 epochs,
+        # batch_size=4, 250-gene input), so 31 slices × 5 min ≈
+        # 2.5 hours. 12 h is generous; bump for CNS if you point
+        # this at the cns_luna silver dir.
+        DEFAULT_VENV="/nfs/team361/sb75/.venvs/celery"
+        DEFAULT_QUEUE="$DEFAULT_QUEUE_CPU"
+        DEFAULT_MEM=64000
+        DEFAULT_CORES=8
+        DEFAULT_WALL="12:00"
+        DEFAULT_GPU=""   # CPU-only — CeLEry doesn't move tensors to CUDA
+        ;;
 esac
 
 # Resolve final values: CLI > matching env var > per-method default.
@@ -458,6 +477,7 @@ case "$METHOD" in
     scgg)       PIPELINE_SUBDIR="scgg_model" ;;
     luna)       PIPELINE_SUBDIR="luna_model" ;;
     novosparc)  PIPELINE_SUBDIR="novosparc_inference" ;;
+    celery)     PIPELINE_SUBDIR="celery_model" ;;
 esac
 
 # LSF stdout/err. Always co-located with the pipeline output for the

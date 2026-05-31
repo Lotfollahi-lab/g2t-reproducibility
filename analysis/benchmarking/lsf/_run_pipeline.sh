@@ -98,8 +98,11 @@ case "$METHOD" in
     novosparc)
         SCRIPT="scripts/run_novosparc_pipeline.py"
         ;;
+    celery)
+        SCRIPT="scripts/run_celery_pipeline.py"
+        ;;
     *)
-        echo "ERROR: unknown METHOD='$METHOD'. Expected scgg|luna|novosparc." >&2
+        echo "ERROR: unknown METHOD='$METHOD'. Expected scgg|luna|novosparc|celery." >&2
         exit 1
         ;;
 esac
@@ -189,15 +192,36 @@ fi
 # passed something like SCGG_OVERRIDE="model.edm.embed_dim=16 train.lr=1e-4";
 # the pipeline's --override is action="extend" nargs="+" so it accepts
 # the multiple tokens directly.
+#
+# Gated to scgg|luna only — these are Hydra-config overrides
+# routed into the vendored LUNA engine. CeLEry has no Hydra config;
+# novosparc has no Hydra config either. If the user accidentally
+# passes --override for those methods, argparse would reject the
+# unknown flag here. Better to silently drop with a warning so a
+# pasted-from-another-method command doesn't crash the job.
 if [[ -n "${SCGG_OVERRIDE:-}" ]]; then
-    # shellcheck disable=SC2206  # intentional word-splitting
-    OVERRIDE_TOKENS=( $SCGG_OVERRIDE )
-    ARGS+=(--override "${OVERRIDE_TOKENS[@]}")
+    case "$METHOD" in
+        scgg|luna)
+            # shellcheck disable=SC2206  # intentional word-splitting
+            OVERRIDE_TOKENS=( $SCGG_OVERRIDE )
+            ARGS+=(--override "${OVERRIDE_TOKENS[@]}")
+            ;;
+        *)
+            echo "WARN  : --override is only supported by scgg/luna; dropping for $METHOD: $SCGG_OVERRIDE" >&2
+            ;;
+    esac
 fi
-if [[ "$METHOD" != "novosparc" ]] && [[ -n "${SCGG_INFERENCE_OVERRIDE:-}" ]]; then
-    # shellcheck disable=SC2206
-    INFER_TOKENS=( $SCGG_INFERENCE_OVERRIDE )
-    ARGS+=(--inference_override "${INFER_TOKENS[@]}")
+if [[ -n "${SCGG_INFERENCE_OVERRIDE:-}" ]]; then
+    case "$METHOD" in
+        scgg|luna)
+            # shellcheck disable=SC2206
+            INFER_TOKENS=( $SCGG_INFERENCE_OVERRIDE )
+            ARGS+=(--inference_override "${INFER_TOKENS[@]}")
+            ;;
+        *)
+            echo "WARN  : --inference_override is only supported by scgg/luna; dropping for $METHOD: $SCGG_INFERENCE_OVERRIDE" >&2
+            ;;
+    esac
 fi
 
 # --- Print + run -------------------------------------------------------------
