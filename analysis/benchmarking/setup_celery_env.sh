@@ -202,9 +202,13 @@ cel.get_zscore(adata_ref)
 cel.get_zscore(adata_qry)
 
 with tempfile.TemporaryDirectory() as tmp:
+    # NB: CeLEry's DNN class hardcodes a 3-layer MLP — it indexes
+    # hidden_dims[0], [1], [2] directly. Passing fewer than 3
+    # widths raises IndexError. The pipeline default is the paper's
+    # [30, 25, 15]; for the smoke test we just need 3 small ints.
     cel.Fit_cord(
         data_train=adata_ref,
-        hidden_dims=[8, 8],
+        hidden_dims=[8, 8, 8],
         num_epochs_max=1,
         batch_size=4,
         num_workers=0,  # 0 to avoid multiproc on small/CI runs
