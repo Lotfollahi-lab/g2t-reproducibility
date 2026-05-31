@@ -77,6 +77,25 @@
 #   --gpu STR             -gpu argument. Default for scgg/luna:
 #                         mode=exclusive_process:num=1:block=yes.
 #                         novosparc defaults to no GPU.
+#   --gpu_model M         Restrict the scheduler to a specific GPU
+#                         model family. M ∈ H200|H100|A100. Appends
+#                         a ``gmem=N`` constraint to the -gpu spec:
+#                           H200 → gmem=120000 (only H200 has ≥120 GB
+#                                  on this cluster, so this uniquely
+#                                  pins to H200 — the ~141 GB card).
+#                           H100 → gmem=70000  (matches H100 AND H200
+#                                  since gmem is a MINIMUM; for
+#                                  H100-only use a manual --gpu spec
+#                                  with an LSF -R "select[...]"
+#                                  expression).
+#                           A100 → gmem=35000  (matches A100-40,
+#                                  A100-80, H100, H200 — same
+#                                  minimum-only caveat).
+#                         Use this when a known config peaks above
+#                         80 GB GPU and you need to guarantee H200
+#                         placement (e.g. CNS scgg with big slices).
+#                         Trade-off: H200 queue is typically smaller
+#                         than H100, so dispatch can be slower.
 #
 # Misc:
 #   --dry_run             Print the bsub command WITHOUT submitting.
@@ -220,6 +239,7 @@ MEM_ARG=""
 CORES_ARG=""
 WALL_ARG=""
 GPU_ARG=""
+GPU_MODEL_ARG=""    # --gpu_model H200|H100|A100 → adds gmem= constraint
 DRY_RUN_ARG="${DRY_RUN:-0}"
 
 while [[ $# -gt 0 ]]; do
@@ -281,6 +301,8 @@ while [[ $# -gt 0 ]]; do
             WALL_ARG="${2:?--wall requires a value}"; shift 2 ;;
         --gpu)
             GPU_ARG="${2:?--gpu requires a value}"; shift 2 ;;
+        --gpu_model)
+            GPU_MODEL_ARG="${2:?--gpu_model requires a value (H200|H100|A100)}"; shift 2 ;;
         --dry_run)
             DRY_RUN_ARG=1; shift ;;
         --help|-h)
@@ -410,6 +432,44 @@ LSF_MEM_FINAL="${MEM_ARG:-$DEFAULT_MEM}"
 LSF_CORES_FINAL="${CORES_ARG:-$DEFAULT_CORES}"
 LSF_WALL_FINAL="${WALL_ARG:-$DEFAULT_WALL}"
 LSF_GPU_FINAL="${GPU_ARG:-$DEFAULT_GPU}"
+
+# --gpu_model H200|H100|A100 → append the right ``gmem=N`` constraint
+# to the -gpu spec. ``gmem=N`` means "give me a GPU with at least N
+# MiB of memory" — LSF then filters its GPU pool accordingly. We use
+# memory as the proxy because LSF on this cluster reports it
+# reliably; the gmodel= field (the proper "model name" constraint)
+# isn't populated consistently across hosts.
+#
+# Mapping (per-MiB):
+#   H200 = 141 GB total → require gmem=120000 (only H200 has ≥120 GB,
+#                         so this effectively pins to H200).
+#   H100 = 80  GB total → require gmem=70000 (matches H100 AND H200
+#                         since gmem is a MINIMUM; if you specifically
+#                         need H100-only, use a manual --gpu string
+#                         with an LSF -R "select[...]" expression
+#                         instead).
+#   A100 = 40 or 80 GB  → require gmem=35000 (matches A100-40, A100-80,
+#                         H100, H200 — same minimum-only caveat).
+#
+# Skip silently if GPU_MODEL_ARG is empty (default behaviour =
+# whichever GPU the scheduler hands out, same as before this flag).
+# Skip with a warning if LSF_GPU_FINAL is empty (CPU-only methods
+# like novosparc / celery don't have a -gpu spec to augment).
+if [[ -n "$GPU_MODEL_ARG" ]]; then
+    if [[ -z "$LSF_GPU_FINAL" ]]; then
+        echo "WARN  : --gpu_model=$GPU_MODEL_ARG ignored — this method is CPU-only (no -gpu spec to constrain)." >&2
+    else
+        case "$GPU_MODEL_ARG" in
+            H200|h200) LSF_GPU_FINAL="${LSF_GPU_FINAL}:gmem=120000" ;;
+            H100|h100) LSF_GPU_FINAL="${LSF_GPU_FINAL}:gmem=70000"  ;;
+            A100|a100) LSF_GPU_FINAL="${LSF_GPU_FINAL}:gmem=35000"  ;;
+            *)
+                echo "ERROR: --gpu_model must be one of H200|H100|A100. Got '$GPU_MODEL_ARG'." >&2
+                exit 2
+                ;;
+        esac
+    fi
+fi
 
 # Repo root: the lsf/ dir is at <repo_root>/scgg-reproducibility/analysis/benchmarking/lsf/,
 # and the scgg monorepo (the one holding scripts/run_*_pipeline.py) is the
@@ -541,6 +601,7 @@ echo "  mem (MB)    : $LSF_MEM_FINAL"
 echo "  wall        : $LSF_WALL_FINAL"
 if [[ -n "$LSF_GPU_FINAL" ]]; then
     echo "  gpu         : $LSF_GPU_FINAL"
+    [[ -n "$GPU_MODEL_ARG" ]] && echo "  gpu_model   : $GPU_MODEL_ARG (forces gmem= constraint above)"
 else
     echo "  gpu         : (none — CPU-only)"
 fi
