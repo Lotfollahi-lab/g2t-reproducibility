@@ -36,6 +36,10 @@
 #   SCGG_WANDB_PROJECT        passed to --wandb_project
 #   SCGG_WANDB_MODE           passed to --wandb_mode
 #   SCGG_EMBEDDING_FIELD      passed to --embedding_field (scgg only)
+#   SCGG_TRAINING_MODE        passed to --training_mode (celery only).
+#                             multi_slice (LUNA Supp Note 2 protocol) or
+#                             per_reference (per-test-slice ref-based
+#                             training).
 #   SCGG_SKIP_TRAINING        if non-empty, append --skip_training
 #                             (scgg + luna; novosparc has no training
 #                             phase so the flag is rejected upstream)
@@ -166,6 +170,13 @@ fi
 # scgg-only: pretrained-embedding obsm field.
 if [[ "$METHOD" == "scgg" ]] && [[ -n "${SCGG_EMBEDDING_FIELD:-}" ]]; then
     ARGS+=(--embedding_field "$SCGG_EMBEDDING_FIELD")
+fi
+
+# celery-only: training mode (multi_slice vs per_reference). The
+# python pipeline's argparse rejects --training_mode for any other
+# method, so we gate on METHOD here.
+if [[ "$METHOD" == "celery" ]] && [[ -n "${SCGG_TRAINING_MODE:-}" ]]; then
+    ARGS+=(--training_mode "$SCGG_TRAINING_MODE")
 fi
 
 # Inference-only mode. Both LUNA and scgg pipelines accept
