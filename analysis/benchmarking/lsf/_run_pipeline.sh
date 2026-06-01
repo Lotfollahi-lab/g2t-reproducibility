@@ -179,6 +179,16 @@ if [[ "$METHOD" == "celery" ]] && [[ -n "${SCGG_TRAINING_MODE:-}" ]]; then
     ARGS+=(--training_mode "$SCGG_TRAINING_MODE")
 fi
 
+# celery-only: --hidden_dims. CeLEry's DNN class hardcodes 3 layers,
+# so SCGG_HIDDEN_DIMS must be exactly 3 space-separated ints (e.g.
+# "256 128 64"). Word-splitting on whitespace pulls those out as
+# separate argv tokens matching argparse's nargs="+".
+if [[ "$METHOD" == "celery" ]] && [[ -n "${SCGG_HIDDEN_DIMS:-}" ]]; then
+    # shellcheck disable=SC2206  # intentional word-splitting
+    HIDDEN_DIMS_TOKENS=( $SCGG_HIDDEN_DIMS )
+    ARGS+=(--hidden_dims "${HIDDEN_DIMS_TOKENS[@]}")
+fi
+
 # Inference-only mode. Both LUNA and scgg pipelines accept
 # --skip_training + --checkpoint; novosparc is gated out because it
 # has no training phase to skip. Upstream validator in

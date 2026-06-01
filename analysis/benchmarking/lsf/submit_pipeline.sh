@@ -230,6 +230,7 @@ WANDB_PROJECT=""
 WANDB_MODE=""
 EMBEDDING_FIELD=""
 TRAINING_MODE=""    # --training_mode multi_slice|per_reference (celery only)
+HIDDEN_DIMS=""      # --hidden_dims "256 128 64" (celery only — 3 widths, space-sep)
 SKIP_TRAINING=""
 CHECKPOINT=""
 EXCLUDE_TEST_FILES=""
@@ -286,6 +287,8 @@ while [[ $# -gt 0 ]]; do
             EMBEDDING_FIELD="${2:?--embedding_field requires a value}"; shift 2 ;;
         --training_mode)
             TRAINING_MODE="${2:?--training_mode requires a value (multi_slice|per_reference)}"; shift 2 ;;
+        --hidden_dims)
+            HIDDEN_DIMS="${2:?--hidden_dims requires 3 space-separated widths, e.g. '256 128 64'}"; shift 2 ;;
         --skip_training)
             SKIP_TRAINING=1; shift ;;
         --checkpoint)
@@ -587,6 +590,7 @@ echo "wandb_run     : $RUN_NAME"
 [[ -n "$WANDB_MODE" ]] && echo "wandb_mode    : $WANDB_MODE"
 [[ -n "$EMBEDDING_FIELD" ]] && echo "embedding_field : $EMBEDDING_FIELD"
 [[ -n "$TRAINING_MODE" ]] && echo "training_mode : $TRAINING_MODE"
+[[ -n "$HIDDEN_DIMS" ]] && echo "hidden_dims : $HIDDEN_DIMS"
 [[ -n "$SKIP_TRAINING" ]] && echo "skip_training : 1 (inference-only)"
 [[ -n "$CHECKPOINT" ]] && echo "checkpoint    : $CHECKPOINT"
 [[ -n "$EXCLUDE_TEST_FILES" ]] && echo "exclude_test_files : $EXCLUDE_TEST_FILES"
@@ -651,6 +655,7 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     printf 'export SCGG_WANDB_MODE=%q\n'         "$WANDB_MODE"
     printf 'export SCGG_EMBEDDING_FIELD=%q\n'    "$EMBEDDING_FIELD"
     printf 'export SCGG_TRAINING_MODE=%q\n'      "$TRAINING_MODE"
+    printf 'export SCGG_HIDDEN_DIMS=%q\n'        "$HIDDEN_DIMS"
     # Inference-only mode: when SKIP_TRAINING is set, the runner
     # forwards --skip_training + --checkpoint to the python pipeline,
     # which then skips the train block and reuses the provided ckpt.
