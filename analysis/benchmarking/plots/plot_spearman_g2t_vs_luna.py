@@ -47,9 +47,10 @@ from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+
+import _nature_style as ns
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -138,29 +139,14 @@ METHODS: dict[str, str] = {
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Style (verbatim from the notebook template)
+# Style — shared with all plot scripts in this directory via
+# _nature_style.py. ``mm`` is the millimetre-to-inch conversion used
+# for sizing the figure in Nature's print units; ``ns.apply()`` installs
+# the journal's font / size / fonttype rcParams globally.
 # ──────────────────────────────────────────────────────────────────────
 
-mm = 1 / 25.4
-mpl.rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-    "font.size": 7,
-    "axes.titlesize": 7,
-    "axes.labelsize": 7,
-    "xtick.labelsize": 5.5,
-    "ytick.labelsize": 6.5,
-    "axes.linewidth": 0.5,
-    "xtick.major.width": 0.5,
-    "ytick.major.width": 0.5,
-    "xtick.major.size": 2.5,
-    "ytick.major.size": 2.5,
-    "pdf.fonttype": 42,
-    "ps.fonttype": 42,
-    "svg.fonttype": "none",
-    "figure.dpi": 300,
-    "savefig.dpi": 300,
-})
+mm = ns.mm
+ns.apply()
 
 
 # ──────────────────────────────────────────────────────────────────────
