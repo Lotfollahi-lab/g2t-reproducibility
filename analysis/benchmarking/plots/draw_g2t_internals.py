@@ -91,22 +91,25 @@ def shape_arrow(ax, x, y_top, y_bot, *, shape_label, lw=0.75):
     )
 
 
-# Layout — compact single column to fit as a sub-panel.
+# Layout — compact single column to fit as a sub-panel. Auxiliary
+# inputs (diffusion time t, noisy positions x_t) are NOT shown as
+# separate boxes — they'd cross-cut the main flow with extra arrows.
+# Instead the transformer's subtext mentions the conditioning,
+# keeping the diagram tall+thin and easy to read top-to-bottom.
 FIG_W_MM = 75.0
-FIG_H_MM = 140.0
+FIG_H_MM = 120.0
 
 COL_X = 12.0
 COL_W = 46.0
 BOX_H = 10.0
 
-# Per-box Y positions (top of each box). Top → bottom.
-Y_INPUT     = 124.0
-Y_INMLP     = 108.0
-Y_AUX       = 92.0      # time + position MLPs side-by-side
-Y_TRANS     = 60.0      # taller block
-Y_OUTMLP    = 42.0
-Y_EDM       = 26.0
-Y_HOUT      = 10.0      # the h embedding output (feeds into panel a/b)
+# Per-box Y positions (top of each box). Top → bottom, tightly packed.
+Y_INPUT  = 104.0
+Y_INMLP  = 88.0
+Y_TRANS  = 48.0    # taller block (32 mm), goes up to y=80
+Y_OUTMLP = 32.0
+Y_EDM    = 18.0
+Y_HOUT   = 4.0     # the h embedding output (feeds into panel a/b)
 
 
 def main(out_dir: Path | None = None) -> int:
@@ -146,45 +149,15 @@ def main(out_dir: Path | None = None) -> int:
         subtext="G → 256 → 256, ReLU",
         phase="data",
     )
+    # Arrow into the top of the transformer block (Y_TRANS + trans_h).
     shape_arrow(ax, COL_X + COL_W / 2, Y_INMLP, Y_TRANS + 32,
                 shape_label="(N, 256)")
 
-    # ---- 3. Time + Position auxiliary MLPs (side by side) ----
-    half_w = COL_W * 0.46
-    gap_mid = (COL_W - 2 * half_w) / 2
-    t_x = COL_X + gap_mid
-    p_x = COL_X + COL_W - half_w - gap_mid
-    rounded_box(
-        ax, t_x, Y_AUX, half_w, BOX_H,
-        label="Time MLP",
-        subtext=r"$t$  1→256→1",
-        phase="data",
-        title_fontsize=5.5, sub_fontsize=4.5,
-    )
-    rounded_box(
-        ax, p_x, Y_AUX, half_w, BOX_H,
-        label="Position MLP",
-        subtext=r"$\mathbf{x}_t$  norm-aware",
-        phase="data",
-        title_fontsize=5.5, sub_fontsize=4.5,
-    )
-    # Thin arrows from each auxiliary input into the transformer
-    ax.annotate(
-        "", xy=(COL_X + COL_W * 0.30, Y_TRANS + 32),
-        xytext=(t_x + half_w / 2, Y_AUX),
-        arrowprops=dict(arrowstyle="-|>", lw=0.55, color=COL_ARROW,
-                        shrinkA=1, shrinkB=1),
-    )
-    ax.annotate(
-        "", xy=(COL_X + COL_W * 0.70, Y_TRANS + 32),
-        xytext=(p_x + half_w / 2, Y_AUX),
-        arrowprops=dict(arrowstyle="-|>", lw=0.55, color=COL_ARROW,
-                        shrinkA=1, shrinkB=1),
-    )
-
-    # ---- 4. Transformer ×8 stack (visualised as overlapping rectangles) ----
+    # ---- 3. Transformer ×8 stack (visualised as overlapping rectangles).
+    # Conditioning inputs (diffusion time t, noisy positions x_t)
+    # are mentioned in the subtext rather than drawn as separate
+    # boxes — keeps the column clean and arrow-free.
     trans_h = 32.0
-    # Faded back layers
     for off_x, off_y, alpha in [(1.2, -1.2, 0.45), (0.6, -0.6, 0.7)]:
         ax.add_patch(patches.FancyBboxPatch(
             (COL_X + off_x, Y_TRANS + off_y), COL_W, trans_h,
@@ -196,10 +169,8 @@ def main(out_dir: Path | None = None) -> int:
         ax, COL_X, Y_TRANS, COL_W, trans_h,
         label="Transformer  ×8",
         subtext=("16-head linear self-attention\n"
-                 "+ FFN(256→256→256)\n"
-                 "+ LayerNorm + residuals\n"
-                 "(per-cell features, time,\n"
-                 "and positions share streams)"),
+                 "+ FFN(256→256→256) + LN + residuals\n"
+                 r"conditioned on $t$ and noisy $\mathbf{x}_t$"),
         phase="data",
         title_fontsize=6.5, sub_fontsize=5.0,
     )
