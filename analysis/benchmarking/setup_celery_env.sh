@@ -133,12 +133,21 @@ log "installing scanpy / anndata / scipy / numpy / pandas / h5py ..."
 # pipelines: matplotlib for the GT-vs-prediction plots, pyyaml for
 # the config.yaml snapshot, wandb for run-level metrics logging,
 # psutil for the _RuntimeTracker's process-tree RSS sampling.
-log "installing matplotlib / pyyaml / wandb / psutil ..."
+# colorcet is what _palette_for() (in run_luna_train._plot_pred_vs_truth,
+# imported and reused by run_celery_inference.py) tries FIRST — it
+# reaches for ``colorcet.glasbey`` to get the LUNA-paper categorical
+# palette, then silently falls back to matplotlib ``tab20`` if the
+# import fails. Without colorcet the celery per-slice plots end up
+# in a different palette than luna's / scgg's plots, which is what
+# the user noticed. Match the other two env scripts (setup_luna_env.sh,
+# setup_scgg_env.sh) and ship colorcet by default.
+log "installing matplotlib / pyyaml / wandb / psutil / colorcet ..."
 "${UV_PIP[@]}" \
     "matplotlib>=3.5" \
     "pyyaml>=6.0" \
     "wandb>=0.15" \
-    "psutil>=5.9"
+    "psutil>=5.9" \
+    "colorcet"
 
 # tqdm — CeLEry uses it for progress bars during training.
 # (scikit-learn was installed earlier; see the CeLEry block above

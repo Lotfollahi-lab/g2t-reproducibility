@@ -1,11 +1,12 @@
-"""plot_spearman_g2t_vs_luna.py
+"""plot_method_comparison.py
 
-Compare G2T (formerly scGG) vs LUNA on the MMC cortex benchmark across
-the full LUNA-paper metric battery — Spearman (mean of medians AND
-mean of means), contact precision / recall / F1, and three flavours of
-RSSD (absolute, mean-of-per-class, sum-of-per-class). One panel per
-metric, all in the same Nature-journal style as the MintFlow
-benchmarking notebook this script was adapted from.
+Compare G2T (formerly scGG) vs LUNA vs CeLEry on the MMC cortex
+benchmark across the full LUNA-paper metric battery — Spearman (mean
+of medians AND mean of means), contact precision / recall / F1, and
+three flavours of RSSD (absolute, mean-of-per-class,
+sum-of-per-class). One panel per metric, all in the same
+Nature-journal style as the MintFlow benchmarking notebook this script
+was adapted from.
 
 Reads pre-computed ``extended_metrics.csv`` files produced by
 ``compute_extended_metrics.py`` (one per inference timestamp directory).
@@ -16,15 +17,18 @@ across slices. Run it FIRST against the same timestamps you want to
 plot, or this script will fail loudly because ``extended_metrics.csv``
 won't exist yet.
 
-The G2T (scGG) timestamps are HARDCODED in ``DEFAULT_SCGG_TIMESTAMPS``
-below because the scgg_inference tree typically holds more runs than
-the canonical N seeds we want in the published comparison. Override
-via ``--scgg_timestamps ts1,ts2,...`` on the CLI. The LUNA timestamps
-are AUTO-DISCOVERED from ``LUNA_INFERENCE_ROOT``.
+The G2T (scGG) AND CeLEry timestamps are HARDCODED in
+``DEFAULT_SCGG_TIMESTAMPS`` / ``DEFAULT_CELERY_TIMESTAMPS`` below
+because each inference tree typically holds more runs than the
+canonical N seeds we want in the published comparison. Override via
+``--scgg_timestamps ts1,...`` / ``--celery_timestamps ts1,...`` on the
+CLI. The LUNA timestamps are AUTO-DISCOVERED from
+``LUNA_INFERENCE_ROOT`` (they're the only method without a multi-mode
+ambiguity, so a glob-all default is safe there).
 
 Outputs (into OUT_DIR):
-    g2t_vs_luna_extended_metrics.{svg,pdf,png}    ← 2×4 multi-panel figure
-    g2t_vs_luna_extended_metrics_processed.csv    ← tidy long-form data
+    g2t_vs_luna_vs_celery_extended_metrics.{svg,pdf,png}  ← 2×4 panels
+    g2t_vs_luna_vs_celery_extended_metrics_processed.csv  ← long-form data
 
 Per-panel design (mirrors the notebook AUC cell):
     - bar         = mean across seeds
@@ -33,7 +37,7 @@ Per-panel design (mirrors the notebook AUC cell):
     - right-side  = "0.463 ± 0.012  (+3.2% ↑ vs LUNA)" on the best method
 
 LSF: tiny CPU-only matplotlib job (~seconds). Submit with
-``bash submit_plot_spearman_g2t_vs_luna.sh`` in the sibling lsf/ dir,
+``bash submit_plot_method_comparison.sh`` in the sibling lsf/ dir,
 which fires it on the ``normal`` queue with 4 GB / 1 core / 10 min.
 """
 
@@ -60,8 +64,9 @@ import _nature_style as ns
 ARTIFACTS_ROOT = Path("/nfs/team361/sb75/scgg-reproducibility/artifacts")
 DATASET = "mmc_luna"
 
-LUNA_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "luna_inference"
-SCGG_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "scgg_inference"
+LUNA_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "luna_inference"
+SCGG_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "scgg_inference"
+CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
 
 # G2T (scGG) seeds — DEFAULT picks the canonical five by timestamp
 # because the scgg_inference tree contains more than five runs and we
@@ -73,6 +78,21 @@ DEFAULT_SCGG_TIMESTAMPS = [
     "20260530_133419",
     "20260530_133412",
     "20260530_093440",
+]
+
+# CeLEry seeds — fixed list of the five PER-REFERENCE runs (seeds 0–4)
+# from the 2026-06-02 sweep. Pinned for the same reason the scgg list
+# is: celery_inference/ also contains the multi_slice variant on the
+# same dataset, and we want the published comparison to use exactly
+# the per_reference protocol (CeLEry's own default + how LUNA's paper
+# benchmarks the non-CeLEry baselines). Override via
+# ``--celery_timestamps`` to swap in the multi_slice runs.
+DEFAULT_CELERY_TIMESTAMPS = [
+    "20260602_074322",  # seed 0
+    "20260602_074327",  # seed 1
+    "20260602_074332",  # seed 2
+    "20260602_074336",  # seed 3
+    "20260602_074342",  # seed 4
 ]
 
 OUT_DIR = ARTIFACTS_ROOT / DATASET / "comparison_plots"
@@ -131,10 +151,19 @@ assert GRID_ROWS * GRID_COLS >= len(METRICS), \
 
 # Display name + colour per method. Order in this dict = top-to-bottom
 # order on the y-axis (top row plotted first). G2T on top because it's
-# the proposed method.
+# the proposed method; LUNA next (the headline diffusion baseline);
+# CeLEry last (supervised-MLP baseline from the LUNA paper's Supp
+# Note 2).
+#
+# Palette is drawn from the shared phase colours in _nature_style.py
+# so the comparison plots stay coherent with the G2T overview figures
+# (draw_g2t_internals.py / draw_scgg_architecture.py).
 METHODS: dict[str, str] = {
-    "G2T": "#FF006E",   # magenta — matches MintFlow's "proposed" colour
-    "LUNA": "#3A86FF",  # blue — matches MEFISTO's spot from the notebook
+    "G2T":    "#FF006E",   # magenta — proposed method (MintFlow "proposed")
+    "LUNA":   "#3A86FF",   # blue    — paper's headline baseline
+    "CeLEry": "#06D6A0",   # teal    — supervised-MLP baseline (matches
+                           #          the "decode" phase colour in
+                           #          _nature_style for visual coherence)
 }
 
 
@@ -414,6 +443,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "every matching subdir under LUNA_INFERENCE_ROOT."
         ),
     )
+    p.add_argument(
+        "--celery_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps to load from "
+            "celery_inference/ for CeLEry. Overrides "
+            "DEFAULT_CELERY_TIMESTAMPS. The default points at the "
+            "PER-REFERENCE sweep (one model per test slice). To "
+            "use the multi-slice sweep instead pass those TS here."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -434,7 +474,8 @@ def _parse_ts_list(s: str | None) -> list[str] | None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    scgg_timestamps = _parse_ts_list(args.scgg_timestamps) or list(DEFAULT_SCGG_TIMESTAMPS)
+    scgg_timestamps   = _parse_ts_list(args.scgg_timestamps)   or list(DEFAULT_SCGG_TIMESTAMPS)
+    celery_timestamps = _parse_ts_list(args.celery_timestamps) or list(DEFAULT_CELERY_TIMESTAMPS)
     luna_timestamps = (
         _parse_ts_list(args.luna_timestamps)
         or _discover_luna_timestamps(LUNA_INFERENCE_ROOT)
@@ -446,13 +487,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[plot_metrics] G2T (scgg) timestamps ({len(scgg_timestamps)}):")
     for ts in scgg_timestamps:
         print(f"    {ts}")
+    print(f"[plot_metrics] CeLEry timestamps ({len(celery_timestamps)}):")
+    for ts in celery_timestamps:
+        print(f"    {ts}")
 
-    luna_df = _collect("LUNA", LUNA_INFERENCE_ROOT, luna_timestamps)
-    g2t_df = _collect("G2T", SCGG_INFERENCE_ROOT, scgg_timestamps)
-    df = pd.concat([g2t_df, luna_df], ignore_index=True)
+    g2t_df    = _collect("G2T",    SCGG_INFERENCE_ROOT,   scgg_timestamps)
+    luna_df   = _collect("LUNA",   LUNA_INFERENCE_ROOT,   luna_timestamps)
+    celery_df = _collect("CeLEry", CELERY_INFERENCE_ROOT, celery_timestamps)
+    df = pd.concat([g2t_df, luna_df, celery_df], ignore_index=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    processed_path = OUT_DIR / "g2t_vs_luna_extended_metrics_processed.csv"
+    processed_path = OUT_DIR / "g2t_vs_luna_vs_celery_extended_metrics_processed.csv"
     df.to_csv(processed_path, index=False)
     print(f"[plot_metrics] saved processed CSV → {processed_path}")
 
@@ -469,18 +514,20 @@ def main(argv: list[str] | None = None) -> int:
     methods = list(METHODS.keys())
     n_methods = len(methods)
 
-    # Per-panel sizes — same constants as the single-panel version so
-    # individual panels look identical. Whole figure is GRID_COLS wide
-    # and GRID_ROWS tall, with annotation room on the right of every
-    # panel (the annotation text uses clip_on=False so it can spill
-    # rightward into the next column's space — but we keep wspace
-    # generous so it doesn't actually collide).
-    panel_width = 42 * mm
-    annotation_room = 38 * mm
-    row_height = 0.22                    # taller than the single-panel
-                                         # version (0.18) because the
-                                         # panel TITLE adds a line
-    fig_width = (panel_width + annotation_room) * GRID_COLS + 0.85
+    # Per-panel sizes — tightened so multiple comparison figures can
+    # sit side-by-side in the final manuscript figure. Each panel is
+    # now ~30 mm of bars + ~30 mm of annotation room, so the full 2×4
+    # figure lands around 240 mm wide × ~60 mm tall (vs the previous
+    # ~320 mm wide). The annotation text uses clip_on=False so it can
+    # spill rightward into the next panel's wspace — keep wspace
+    # generous (subplots_adjust below) so it doesn't actually collide.
+    panel_width      = 28 * mm           # was 42 — narrower bar region
+    annotation_room  = 30 * mm           # was 38 — shorter "± SEM (% ↑)"
+    row_height       = 0.20              # was 0.22 — one extra method
+                                         # (CeLEry) per panel; offset by
+                                         # slightly shorter row height
+                                         # so the figure doesn't grow
+    fig_width  = (panel_width + annotation_room) * GRID_COLS + 0.85
     fig_height = (n_methods * row_height + 0.55) * GRID_ROWS + 0.45
 
     fig, axes = plt.subplots(
@@ -509,16 +556,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Single shared figure footer caption: identify the dataset + the
     # number of seeds powering each method's bars.
-    n_g2t = df.loc[df["method"] == "G2T", "timestamp"].nunique()
-    n_luna = df.loc[df["method"] == "LUNA", "timestamp"].nunique()
+    n_g2t    = df.loc[df["method"] == "G2T",    "timestamp"].nunique()
+    n_luna   = df.loc[df["method"] == "LUNA",   "timestamp"].nunique()
+    n_celery = df.loc[df["method"] == "CeLEry", "timestamp"].nunique()
     fig.text(
         0.5, 0.03,
-        f"MMC cortex — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds). "
+        f"MMC cortex — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds) vs "
+        f"CeLEry ({n_celery} seeds). "
         f"Bar = mean across seeds, error bar = SEM, dots = individual seeds.",
         ha="center", va="center", fontsize=6.5, fontweight="medium",
     )
 
-    out_stem = "g2t_vs_luna_extended_metrics"
+    out_stem = "g2t_vs_luna_vs_celery_extended_metrics"
     for ext in ("svg", "pdf", "png"):
         out_path = OUT_DIR / f"{out_stem}.{ext}"
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)
