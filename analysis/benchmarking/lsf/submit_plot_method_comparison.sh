@@ -32,6 +32,16 @@
 #                            files already exist and you just want to
 #                            re-render the figure with new style /
 #                            different timestamps.
+#   --methods LIST           Comma-separated subset of methods to
+#                            (re-)score in the compute step:
+#                            luna, g2t (alias scgg), celery. Default
+#                            scores all three. Use this to incrementally
+#                            score a new method without redoing the
+#                            others — e.g. ``--methods celery`` re-scores
+#                            ONLY celery_inference and leaves the
+#                            existing luna + scgg extended_metrics.csv
+#                            files alone. The plot step ALWAYS reads
+#                            all three methods, regardless of --methods.
 #   --scgg_timestamps LIST   Comma-separated YYYYMMDD_HHMMSS timestamps
 #                            to load from scgg_inference/ for G2T.
 #                            Forwarded to BOTH the compute step and the
@@ -40,6 +50,9 @@
 #   --luna_timestamps LIST   Comma-separated YYYYMMDD_HHMMSS timestamps
 #                            to load from luna_inference/. Defaults to
 #                            auto-discovery (every matching subdir).
+#   --celery_timestamps LIST Comma-separated YYYYMMDD_HHMMSS timestamps
+#                            to load from celery_inference/. Defaults
+#                            to the hardcoded per_reference seeds list.
 #   --wall HH:MM             LSF wall-clock cap. Default: 12:00 (12 h).
 #                            Drop to 00:30 if you've already run with
 #                            --skip_compute and just want a fast
@@ -86,8 +99,10 @@ set -euo pipefail
 
 DRY_RUN=0
 SKIP_COMPUTE=0
+METHODS=""              # e.g. "celery" → forwarded as compute's --methods
 SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
+CELERY_TIMESTAMPS=""
 WALL_ARG=""
 MEM_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -96,10 +111,18 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=1; shift ;;
         --skip_compute)
             SKIP_COMPUTE=1; shift ;;
+        --methods)
+            # Subset to compute extended_metrics for; e.g. "celery" to
+            # re-score ONLY the celery_inference tree (leaving the
+            # luna + scgg extended_metrics.csv files untouched). Plot
+            # step is unaffected — it always reads all three trees.
+            METHODS="${2:?--methods requires a value, e.g. 'celery' or 'luna,g2t,celery'}"; shift 2 ;;
         --scgg_timestamps)
             SCGG_TIMESTAMPS="${2:?--scgg_timestamps requires a value}"; shift 2 ;;
         --luna_timestamps)
             LUNA_TIMESTAMPS="${2:?--luna_timestamps requires a value}"; shift 2 ;;
+        --celery_timestamps)
+            CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
         --wall)
             WALL_ARG="${2:?--wall requires a value, e.g. 24:00}"; shift 2 ;;
         --mem)
@@ -168,25 +191,40 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     if [[ "$SKIP_COMPUTE" == "0" ]]; then
         echo "# Step 1: compute extended_metrics.csv per inference timestamp."
         # Build the compute-step argv. Pass timestamps when present so
-        # the same scgg/luna seeds get scored that the plot will pull.
+        # the same scgg/luna/celery seeds get scored that the plot will
+        # pull. ``--methods`` lets the caller score only a subset
+        # (e.g. ``--methods celery`` to re-score ONLY celery while
+        # leaving luna + scgg extended_metrics.csv untouched).
         # printf %q safely shell-quotes every value.
         printf 'python %q' "$COMPUTE_SCRIPT"
+        if [[ -n "$METHODS" ]]; then
+            printf ' --methods %q' "$METHODS"
+        fi
         if [[ -n "$SCGG_TIMESTAMPS" ]]; then
             printf ' --scgg_timestamps %q' "$SCGG_TIMESTAMPS"
         fi
         if [[ -n "$LUNA_TIMESTAMPS" ]]; then
             printf ' --luna_timestamps %q' "$LUNA_TIMESTAMPS"
         fi
+        if [[ -n "$CELERY_TIMESTAMPS" ]]; then
+            printf ' --celery_timestamps %q' "$CELERY_TIMESTAMPS"
+        fi
         printf '\n'
         echo
     fi
     echo "# Step 2: render the multi-metric comparison figure."
+    # The plot step ALWAYS pulls all three methods (no --methods knob)
+    # — the figure wouldn't make sense with only one bar. Forward any
+    # explicit timestamp lists so plot + compute agree on which seeds.
     printf 'exec python %q' "$PLOT_SCRIPT"
     if [[ -n "$SCGG_TIMESTAMPS" ]]; then
         printf ' --scgg_timestamps %q' "$SCGG_TIMESTAMPS"
     fi
     if [[ -n "$LUNA_TIMESTAMPS" ]]; then
         printf ' --luna_timestamps %q' "$LUNA_TIMESTAMPS"
+    fi
+    if [[ -n "$CELERY_TIMESTAMPS" ]]; then
+        printf ' --celery_timestamps %q' "$CELERY_TIMESTAMPS"
     fi
     printf '\n'
 } > "$JOB_SCRIPT"
@@ -204,8 +242,10 @@ echo "out dir         : $OUT_DIR"
 echo "log dir         : $LOG_DIR"
 echo "job script      : $JOB_SCRIPT"
 echo "skip compute    : $SKIP_COMPUTE"
-[[ -n "$SCGG_TIMESTAMPS" ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
-[[ -n "$LUNA_TIMESTAMPS" ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
+[[ -n "$METHODS"           ]] && echo "methods         : $METHODS"
+[[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
+[[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
+[[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
 echo "wall            : $WALL_FINAL"
 echo "mem (MB)        : $MEM_FINAL"
 echo "dry run         : $DRY_RUN"

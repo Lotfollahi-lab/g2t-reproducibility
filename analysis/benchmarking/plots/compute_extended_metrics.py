@@ -36,14 +36,26 @@ is ``spearman_mean_of_medians`` (Fig. 3); we additionally write
 ``spearman_mean_of_means`` plus mean/median/std of every other metric.
 
 Usage:
-    python compute_extended_metrics.py \\
-        --luna_timestamps 20260526_072208,20260526_093724,... \\
-        --scgg_timestamps 20260530_133432,20260530_133426,...
+    # Score every method (default — uses DEFAULT_SCGG_TIMESTAMPS and
+    # DEFAULT_CELERY_TIMESTAMPS hard-coded below, plus auto-discovers
+    # every LUNA timestamp):
+    python compute_extended_metrics.py
 
-If --luna_timestamps is omitted, auto-discovers every YYYYMMDD_HHMMSS
-subdir under LUNA_INFERENCE_ROOT (mirrors the plot script's behaviour).
---scgg_timestamps must be supplied explicitly (the scgg tree typically
-holds more than the canonical N seeds).
+    # Score ONLY celery (luna + g2t already done in a prior run):
+    python compute_extended_metrics.py --methods celery
+
+    # Score luna + g2t but skip celery:
+    python compute_extended_metrics.py --methods luna,g2t
+
+    # Override the default timestamp lists for one or more methods:
+    python compute_extended_metrics.py \\
+        --luna_timestamps   20260526_072208,20260526_093724,... \\
+        --scgg_timestamps   20260530_133432,20260530_133426,... \\
+        --celery_timestamps 20260602_074322,20260602_074327,...
+
+Default per-method timestamp lists are HARDCODED below to mirror
+``plot_method_comparison.py`` — change them in one place and both
+scripts pick up the new canonical seed set.
 """
 
 from __future__ import annotations
@@ -52,7 +64,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -79,8 +91,40 @@ from scgg.evaluation.luna_metrics import (  # noqa: E402
 ARTIFACTS_ROOT = Path("/nfs/team361/sb75/scgg-reproducibility/artifacts")
 DATASET = "mmc_luna"
 
-LUNA_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "luna_inference"
-SCGG_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "scgg_inference"
+LUNA_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "luna_inference"
+SCGG_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "scgg_inference"
+CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
+
+# Default per-method timestamp lists — MUST match the ones in
+# plot_method_comparison.py so a default-flags run of this script
+# scores exactly the seeds the plot will pull. Change in one place,
+# remember to mirror in the other (or factor both out into a shared
+# config module later if this drifts often).
+DEFAULT_SCGG_TIMESTAMPS = [
+    "20260530_133432",
+    "20260530_133426",
+    "20260530_133419",
+    "20260530_133412",
+    "20260530_093440",
+]
+DEFAULT_CELERY_TIMESTAMPS = [
+    "20260602_074322",  # seed 0  (per_reference)
+    "20260602_074327",  # seed 1
+    "20260602_074332",  # seed 2
+    "20260602_074336",  # seed 3
+    "20260602_074342",  # seed 4
+]
+
+# Valid --methods tokens. "g2t" and "scgg" are aliases for the same
+# inference tree (the package is named scgg internally but published
+# as G2T) — accept both so old shell-snippets keep working.
+_METHOD_ALIASES = {
+    "luna":   "LUNA",
+    "g2t":    "G2T",
+    "scgg":   "G2T",
+    "celery": "CeLEry",
+}
+_DEFAULT_METHODS = ["luna", "g2t", "celery"]
 
 # Columns written by both pipelines (scgg + luna utils/data/load.py
 # both call ``metadata.to_csv(...)`` with this fixed schema).
@@ -271,6 +315,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--methods",
+        default=",".join(_DEFAULT_METHODS),
+        help=(
+            "Comma-separated subset of methods to score. Tokens: "
+            "luna, g2t (alias scgg), celery. Default scores all three. "
+            "Use this to skip methods you've already scored — e.g. "
+            "``--methods celery`` re-scores ONLY celery_inference/, "
+            "leaving the existing luna_inference/extended_metrics.csv "
+            "and scgg_inference/extended_metrics.csv untouched."
+        ),
+    )
+    p.add_argument(
         "--luna_timestamps",
         default=None,
         help=(
@@ -284,10 +340,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated YYYYMMDD_HHMMSS timestamps under "
-            "<scgg_inference>. If omitted, auto-discovers every "
-            "matching subdir (typically NOT what you want for scgg — "
-            "the tree usually holds more runs than the canonical N "
-            "seeds, so prefer to specify explicitly)."
+            "<scgg_inference>. If omitted, uses DEFAULT_SCGG_TIMESTAMPS "
+            "(the canonical N seeds — same list the plot script pulls). "
+            "The legacy behaviour of auto-discovering every subdir was "
+            "removed because the scgg tree typically holds many more "
+            "runs than we want in the published comparison; running the "
+            "compute step over all of them would score dozens of "
+            "obsolete experiments unnecessarily."
+        ),
+    )
+    p.add_argument(
+        "--celery_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps under "
+            "<celery_inference>. If omitted, uses "
+            "DEFAULT_CELERY_TIMESTAMPS (the per_reference sweep, "
+            "same 5 seeds the plot script pulls). Pass the multi_slice "
+            "TS here to score those instead."
         ),
     )
     p.add_argument(
@@ -314,32 +384,72 @@ def _parse_ts_list(s: str | None) -> list[str] | None:
     return items
 
 
+def _parse_methods(s: str) -> list[str]:
+    """Validate + canonicalise --methods. Returns a list of *canonical*
+    labels (``LUNA``, ``G2T``, ``CeLEry``) preserving the user's order so
+    log output reads in the order they asked for."""
+    tokens = [t.strip().lower() for t in s.split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("--methods parsed to empty list")
+    bad = [t for t in tokens if t not in _METHOD_ALIASES]
+    if bad:
+        raise ValueError(
+            f"unknown --methods token(s): {bad}. "
+            f"valid: {sorted(_METHOD_ALIASES.keys())}"
+        )
+    # de-dup while preserving order (g2t + scgg are aliases — keep first)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        canonical = _METHOD_ALIASES[t]
+        if canonical not in seen:
+            seen.add(canonical)
+            out.append(canonical)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    luna_ts = _parse_ts_list(args.luna_timestamps) or _discover_timestamps(LUNA_INFERENCE_ROOT)
-    if args.scgg_timestamps is None:
-        print("[compute_extended] WARN: --scgg_timestamps not provided; "
-              "auto-discovering ALL scgg_inference timestamps. "
-              "Pass --scgg_timestamps=ts1,ts2,... to restrict.")
-        scgg_ts = _discover_timestamps(SCGG_INFERENCE_ROOT)
-    else:
-        scgg_ts = _parse_ts_list(args.scgg_timestamps)
+    selected = _parse_methods(args.methods)
 
-    print(f"[compute_extended] LUNA  ({len(luna_ts)}):")
-    for t in luna_ts:
-        print(f"    {t}")
-    print(f"[compute_extended] G2T   ({len(scgg_ts)}):")
-    for t in scgg_ts:
-        print(f"    {t}")
+    # Build the (method_label, root, timestamps) work list, scoping each
+    # method's timestamp source independently:
+    #   - LUNA: explicit list, else auto-discover the tree.
+    #   - G2T:  explicit list, else DEFAULT_SCGG_TIMESTAMPS.
+    #   - CeLEry: explicit list, else DEFAULT_CELERY_TIMESTAMPS.
+    # Only methods in ``selected`` are added to the work list — others
+    # are silently skipped (their already-existing extended_metrics.csv
+    # is left untouched).
+    work: list[tuple[str, Path, list[str]]] = []
+    if "LUNA" in selected:
+        luna_ts = _parse_ts_list(args.luna_timestamps) or _discover_timestamps(LUNA_INFERENCE_ROOT)
+        work.append(("LUNA", LUNA_INFERENCE_ROOT, luna_ts))
+    if "G2T" in selected:
+        scgg_ts = _parse_ts_list(args.scgg_timestamps) or list(DEFAULT_SCGG_TIMESTAMPS)
+        work.append(("G2T", SCGG_INFERENCE_ROOT, scgg_ts))
+    if "CeLEry" in selected:
+        celery_ts = _parse_ts_list(args.celery_timestamps) or list(DEFAULT_CELERY_TIMESTAMPS)
+        work.append(("CeLEry", CELERY_INFERENCE_ROOT, celery_ts))
+
+    if not work:
+        # Defensive: _parse_methods enforces non-empty, but if the
+        # canonical labels somehow collapse to zero (impossible today)
+        # we'd silently do nothing — fail loudly instead.
+        print("[compute_extended] ERROR: no methods selected after parsing "
+              f"--methods={args.methods!r}", file=sys.stderr)
+        return 2
+
+    print(f"[compute_extended] methods to score: {[m for m, _, _ in work]}")
+    for label, _, ts_list in work:
+        print(f"[compute_extended] {label} ({len(ts_list)}):")
+        for t in ts_list:
+            print(f"    {t}")
 
     n_done = 0
     n_skipped = 0
     n_failed = 0
-    for method_label, root, ts_list in [
-        ("LUNA", LUNA_INFERENCE_ROOT, luna_ts),
-        ("G2T", SCGG_INFERENCE_ROOT, scgg_ts),
-    ]:
+    for method_label, root, ts_list in work:
         for ts in ts_list:
             ts_root = root / ts
             agg_path = ts_root / "extended_metrics.csv"
