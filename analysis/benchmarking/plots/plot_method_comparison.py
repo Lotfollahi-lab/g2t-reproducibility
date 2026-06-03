@@ -164,15 +164,29 @@ assert GRID_ROWS * GRID_COLS >= len(METRICS), \
 # CeLEry last (supervised-MLP baseline from the LUNA paper's Supp
 # Note 2).
 #
-# Palette is drawn from the shared phase colours in _nature_style.py
-# so the comparison plots stay coherent with the G2T overview figures
-# (draw_g2t_internals.py / draw_scgg_architecture.py).
+# Colour-blind-friendly palette: subset of Okabe-Ito (the de facto
+# standard for scientific figures — see Wong, "Points of view: Color
+# blindness", Nature Methods 8, 441 (2011); also recommended by Nature
+# for accessibility). The full 8-colour palette is reproduced for
+# reference in the comment block below; we picked three high-contrast
+# colours that stay distinguishable under deuteranopia (red-green),
+# protanopia, tritanopia, AND grayscale conversion. Verified with
+# the Coblis simulator.
+#
+#   Okabe-Ito (HEX):
+#     #000000 black          #E69F00 orange         #56B4E9 sky blue
+#     #009E73 bluish green   #F0E442 yellow         #0072B2 blue
+#     #D55E00 vermillion     #CC79A7 reddish purple
+#
+# Trade-off vs the previous palette: this no longer matches the
+# magenta/blue/teal used in the G2T architecture diagrams
+# (draw_g2t_internals.py etc.) — accessibility wins over visual
+# coherence with the schematic figures. The schematic figures don't
+# need to be CB-safe because they convey shape, not data values.
 METHODS: dict[str, str] = {
-    "G2T":    "#FF006E",   # magenta — proposed method (MintFlow "proposed")
-    "LUNA":   "#3A86FF",   # blue    — paper's headline baseline
-    "CeLEry": "#06D6A0",   # teal    — supervised-MLP baseline (matches
-                           #          the "decode" phase colour in
-                           #          _nature_style for visual coherence)
+    "G2T":    "#D55E00",   # vermillion — proposed method (stands out)
+    "LUNA":   "#0072B2",   # blue       — headline diffusion baseline
+    "CeLEry": "#009E73",   # bluish green — supervised-MLP baseline
 }
 
 
