@@ -72,12 +72,21 @@ CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
 # because the scgg_inference tree contains more than five runs and we
 # need to pin which five form the published comparison. Override via
 # ``--scgg_timestamps ts1,ts2,...`` on the CLI.
+#
+# Refreshed 2026-06-02: switched from the 20260530_133*** sweep to
+# the 20260530_165*** sweep (heads32_fastmds config, seeds 0–4).
+# Headline spearman_per_cell_median on these:
+#   seed0 → 0.469, seed1 → 0.469, seed2 → 0.477,
+#   seed3 → 0.469, seed4 → 0.478.
+# If you update this list, mirror the change in
+# compute_extended_metrics.py.DEFAULT_SCGG_TIMESTAMPS so the compute
+# step scores the same seeds the plot step pulls.
 DEFAULT_SCGG_TIMESTAMPS = [
-    "20260530_133432",
-    "20260530_133426",
-    "20260530_133419",
-    "20260530_133412",
-    "20260530_093440",
+    "20260530_165200",  # seed 0
+    "20260530_165210",  # seed 1
+    "20260530_165216",  # seed 2
+    "20260530_165223",  # seed 3
+    "20260530_165229",  # seed 4
 ]
 
 # CeLEry seeds — fixed list of the five PER-REFERENCE runs (seeds 0–4)

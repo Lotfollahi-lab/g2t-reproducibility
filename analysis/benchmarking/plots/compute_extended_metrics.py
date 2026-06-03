@@ -101,11 +101,14 @@ CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
 # remember to mirror in the other (or factor both out into a shared
 # config module later if this drifts often).
 DEFAULT_SCGG_TIMESTAMPS = [
-    "20260530_133432",
-    "20260530_133426",
-    "20260530_133419",
-    "20260530_133412",
-    "20260530_093440",
+    # Refreshed 2026-06-02: switched to the heads32_fastmds
+    # seed0–4 sweep at 20260530_165***.  Mirror with the same
+    # constant in plot_method_comparison.py.
+    "20260530_165200",  # seed 0
+    "20260530_165210",  # seed 1
+    "20260530_165216",  # seed 2
+    "20260530_165223",  # seed 3
+    "20260530_165229",  # seed 4
 ]
 DEFAULT_CELERY_TIMESTAMPS = [
     "20260602_074322",  # seed 0  (per_reference)
