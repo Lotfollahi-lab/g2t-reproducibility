@@ -40,6 +40,10 @@
 #                             multi_slice (LUNA Supp Note 2 protocol) or
 #                             per_reference (per-test-slice ref-based
 #                             training).
+#   SCGG_BATCH_SIZE           passed to --batch_size (celery only).
+#                             Overrides CeLEry's tiny default of 4.
+#                             Use 64-256 for CNS to let the CPU BLAS
+#                             matmul saturate the OMP threads.
 #   SCGG_SKIP_TRAINING        if non-empty, append --skip_training
 #                             (scgg + luna; novosparc has no training
 #                             phase so the flag is rejected upstream)
@@ -187,6 +191,15 @@ if [[ "$METHOD" == "celery" ]] && [[ -n "${SCGG_HIDDEN_DIMS:-}" ]]; then
     # shellcheck disable=SC2206  # intentional word-splitting
     HIDDEN_DIMS_TOKENS=( $SCGG_HIDDEN_DIMS )
     ARGS+=(--hidden_dims "${HIDDEN_DIMS_TOKENS[@]}")
+fi
+# CeLEry's Fit_cord batch_size. Defaults to 4 (CeLEry source default),
+# but for large CNS train sets bumping to 64–256 dramatically speeds
+# up per-iteration wall time because CeLEry is CPU-only and a bigger
+# batch lets the BLAS matmul kernel actually saturate the OMP threads
+# we requested via --cores + OMP_NUM_THREADS. Set via --batch_size on
+# submit_pipeline.sh.
+if [[ "$METHOD" == "celery" ]] && [[ -n "${SCGG_BATCH_SIZE:-}" ]]; then
+    ARGS+=(--batch_size "$SCGG_BATCH_SIZE")
 fi
 
 # Inference-only mode. Both LUNA and scgg pipelines accept

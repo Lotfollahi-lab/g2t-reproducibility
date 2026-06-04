@@ -231,6 +231,7 @@ WANDB_MODE=""
 EMBEDDING_FIELD=""
 TRAINING_MODE=""    # --training_mode multi_slice|per_reference (celery only)
 HIDDEN_DIMS=""      # --hidden_dims "256 128 64" (celery only — 3 widths, space-sep)
+BATCH_SIZE=""       # --batch_size N (celery only — overrides Fit_cord default of 4)
 SKIP_TRAINING=""
 CHECKPOINT=""
 EXCLUDE_TEST_FILES=""
@@ -289,6 +290,8 @@ while [[ $# -gt 0 ]]; do
             TRAINING_MODE="${2:?--training_mode requires a value (multi_slice|per_reference)}"; shift 2 ;;
         --hidden_dims)
             HIDDEN_DIMS="${2:?--hidden_dims requires 3 space-separated widths, e.g. '256 128 64'}"; shift 2 ;;
+        --batch_size)
+            BATCH_SIZE="${2:?--batch_size requires a positive integer (celery only)}"; shift 2 ;;
         --skip_training)
             SKIP_TRAINING=1; shift ;;
         --checkpoint)
@@ -594,6 +597,7 @@ echo "wandb_run     : $RUN_NAME"
 [[ -n "$SKIP_TRAINING" ]] && echo "skip_training : 1 (inference-only)"
 [[ -n "$CHECKPOINT" ]] && echo "checkpoint    : $CHECKPOINT"
 [[ -n "$EXCLUDE_TEST_FILES" ]] && echo "exclude_test_files : $EXCLUDE_TEST_FILES"
+[[ -n "$BATCH_SIZE"          ]] && echo "batch_size         : $BATCH_SIZE"
 echo "----------------------------------------------------------------"
 echo "repo          : $SCGG_REPO_FINAL"
 echo "venv          : $VENV_PATH"
@@ -656,6 +660,7 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     printf 'export SCGG_EMBEDDING_FIELD=%q\n'    "$EMBEDDING_FIELD"
     printf 'export SCGG_TRAINING_MODE=%q\n'      "$TRAINING_MODE"
     printf 'export SCGG_HIDDEN_DIMS=%q\n'        "$HIDDEN_DIMS"
+    printf 'export SCGG_BATCH_SIZE=%q\n'         "$BATCH_SIZE"
     # Inference-only mode: when SKIP_TRAINING is set, the runner
     # forwards --skip_training + --checkpoint to the python pipeline,
     # which then skips the train block and reuses the provided ckpt.
@@ -667,6 +672,20 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     # Also forward the artifacts root so the runner / pipeline reads
     # the same place the submitter wrote logs to.
     printf 'export SCGG_ARTIFACTS_ROOT=%q\n'     "$ARTIFACTS_ROOT"
+
+    # Match BLAS/MKL/OpenMP thread counts to the LSF -n value so
+    # PyTorch's CPU matmul ACTUALLY uses all the cores we requested.
+    # Without this, PyTorch picks its own default (often 1 or
+    # ``physical_cores/2``) and ignores the LSF allocation — bumping
+    # ``--cores 32`` produces no speedup. Especially important for
+    # CeLEry (CPU-only) on CNS where the first MLP layer is large
+    # enough that the matmul actually parallelises across threads.
+    # OMP_NUM_THREADS covers PyTorch's intra-op threads;
+    # MKL_NUM_THREADS covers Intel MKL (numpy / scikit-learn);
+    # OPENBLAS_NUM_THREADS covers the OpenBLAS path.
+    printf 'export OMP_NUM_THREADS=%q\n'         "$LSF_CORES_FINAL"
+    printf 'export MKL_NUM_THREADS=%q\n'         "$LSF_CORES_FINAL"
+    printf 'export OPENBLAS_NUM_THREADS=%q\n'    "$LSF_CORES_FINAL"
     echo
     echo "# Hand off to the runner, which activates the venv and"
     echo "# launches the python pipeline."
