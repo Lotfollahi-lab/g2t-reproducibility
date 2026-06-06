@@ -89,34 +89,70 @@ from scgg.evaluation.luna_metrics import (  # noqa: E402
 # ──────────────────────────────────────────────────────────────────────
 
 ARTIFACTS_ROOT = Path("/nfs/team361/sb75/scgg-reproducibility/artifacts")
-DATASET = "mmc_luna"
+DEFAULT_DATASET = "mmc_luna"
+VALID_DATASETS = ("mmc_luna", "cns_luna")
 
-LUNA_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "luna_inference"
-SCGG_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "scgg_inference"
-CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
-
-# Default per-method timestamp lists — MUST match the ones in
+# Per-dataset default per-method timestamp lists. Keys are dataset
+# names; values are the canonical N seeds to score / plot for that
+# method+dataset combo. MUST match the ones in
 # plot_method_comparison.py so a default-flags run of this script
 # scores exactly the seeds the plot will pull. Change in one place,
 # remember to mirror in the other (or factor both out into a shared
 # config module later if this drifts often).
-DEFAULT_SCGG_TIMESTAMPS = [
-    # Refreshed 2026-06-02: switched to the heads32_fastmds
-    # seed0–4 sweep at 20260530_165***.  Mirror with the same
-    # constant in plot_method_comparison.py.
-    "20260530_165200",  # seed 0
-    "20260530_165210",  # seed 1
-    "20260530_165216",  # seed 2
-    "20260530_165223",  # seed 3
-    "20260530_165229",  # seed 4
-]
-DEFAULT_CELERY_TIMESTAMPS = [
-    "20260602_074322",  # seed 0  (per_reference)
-    "20260602_074327",  # seed 1
-    "20260602_074332",  # seed 2
-    "20260602_074336",  # seed 3
-    "20260602_074342",  # seed 4
-]
+#
+# LUNA: in the MMC case we auto-discover (the tree only ever held
+# the 5 canonical seeds). For CNS the tree holds extra exploratory
+# runs we don't want in the figure, so we pin 5 explicit seeds.
+DEFAULT_SCGG_TIMESTAMPS: dict[str, list[str]] = {
+    # 2026-05-30 heads32_fastmds seed0-4 sweep — MMC headline run set.
+    "mmc_luna": [
+        "20260530_165200",  # seed 0
+        "20260530_165210",  # seed 1
+        "20260530_165216",  # seed 2
+        "20260530_165223",  # seed 3
+        "20260530_165229",  # seed 4
+    ],
+    # 2026-06-02 heads32_fastmds seed0-4 sweep on CNS.
+    "cns_luna": [
+        "20260602_142452",  # seed 0
+        "20260602_142505",  # seed 1
+        "20260602_142510",  # seed 2
+        "20260602_142516",  # seed 3
+        "20260602_142522",  # seed 4
+    ],
+}
+DEFAULT_CELERY_TIMESTAMPS: dict[str, list[str]] = {
+    # 2026-06-02 per_reference seed0-4 sweep on MMC.
+    "mmc_luna": [
+        "20260602_074322",  # seed 0
+        "20260602_074327",  # seed 1
+        "20260602_074332",  # seed 2
+        "20260602_074336",  # seed 3
+        "20260602_074342",  # seed 4
+    ],
+    # 2026-06-04 per_reference seed0-4 sweep on CNS
+    # (sagittal1/2/3 + spinalcord excluded; basement queue; bs=256;
+    #  --cores 32 + OMP/MKL thread propagation).
+    "cns_luna": [
+        "20260604_101049",  # seed 0
+        "20260604_141924",  # seed 1
+        "20260604_141952",  # seed 2
+        "20260604_142006",  # seed 3
+        "20260604_141959",  # seed 4
+    ],
+}
+# LUNA defaults: MMC = auto-discover (empty list = fall back to
+# _discover_timestamps); CNS = pin the 5 we want in the figure.
+DEFAULT_LUNA_TIMESTAMPS: dict[str, list[str]] = {
+    "mmc_luna": [],
+    "cns_luna": [
+        "20260601_085512",  # seed 0
+        "20260601_085523",  # seed 1
+        "20260601_085535",  # seed 2
+        "20260601_085541",  # seed 3
+        "20260601_085547",  # seed 4
+    ],
+}
 
 # Valid --methods tokens. "g2t" and "scgg" are aliases for the same
 # inference tree (the package is named scgg internally but published
@@ -318,6 +354,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--dataset",
+        default=DEFAULT_DATASET,
+        choices=VALID_DATASETS,
+        help=(
+            f"Dataset slug (subdir of {ARTIFACTS_ROOT}). Default "
+            f"{DEFAULT_DATASET!r}. Selects both the inference roots "
+            f"to score AND the DEFAULT_*_TIMESTAMPS dicts' keys."
+        ),
+    )
+    p.add_argument(
         "--methods",
         default=",".join(_DEFAULT_METHODS),
         help=(
@@ -416,24 +462,53 @@ def main(argv: list[str] | None = None) -> int:
 
     selected = _parse_methods(args.methods)
 
+    # Resolve dataset-derived paths + default timestamp lists.
+    dataset = args.dataset
+    luna_root   = ARTIFACTS_ROOT / dataset / "luna_inference"
+    scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
+    celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
+    print(f"[compute_extended] dataset = {dataset}")
+
     # Build the (method_label, root, timestamps) work list, scoping each
     # method's timestamp source independently:
-    #   - LUNA: explicit list, else auto-discover the tree.
-    #   - G2T:  explicit list, else DEFAULT_SCGG_TIMESTAMPS.
-    #   - CeLEry: explicit list, else DEFAULT_CELERY_TIMESTAMPS.
+    #   - LUNA: explicit list, else DEFAULT_LUNA_TIMESTAMPS[dataset];
+    #     if that's empty, fall back to auto-discovering the tree.
+    #   - G2T:  explicit list, else DEFAULT_SCGG_TIMESTAMPS[dataset].
+    #   - CeLEry: explicit list, else DEFAULT_CELERY_TIMESTAMPS[dataset].
     # Only methods in ``selected`` are added to the work list — others
     # are silently skipped (their already-existing extended_metrics.csv
     # is left untouched).
     work: list[tuple[str, Path, list[str]]] = []
     if "LUNA" in selected:
-        luna_ts = _parse_ts_list(args.luna_timestamps) or _discover_timestamps(LUNA_INFERENCE_ROOT)
-        work.append(("LUNA", LUNA_INFERENCE_ROOT, luna_ts))
+        luna_ts = (
+            _parse_ts_list(args.luna_timestamps)
+            or list(DEFAULT_LUNA_TIMESTAMPS.get(dataset, []))
+            or _discover_timestamps(luna_root)
+        )
+        work.append(("LUNA", luna_root, luna_ts))
     if "G2T" in selected:
-        scgg_ts = _parse_ts_list(args.scgg_timestamps) or list(DEFAULT_SCGG_TIMESTAMPS)
-        work.append(("G2T", SCGG_INFERENCE_ROOT, scgg_ts))
+        scgg_ts = (
+            _parse_ts_list(args.scgg_timestamps)
+            or list(DEFAULT_SCGG_TIMESTAMPS.get(dataset, []))
+        )
+        if not scgg_ts:
+            raise RuntimeError(
+                f"No G2T timestamps for dataset={dataset!r}. Add an entry "
+                f"to DEFAULT_SCGG_TIMESTAMPS or pass --scgg_timestamps."
+            )
+        work.append(("G2T", scgg_root, scgg_ts))
     if "CeLEry" in selected:
-        celery_ts = _parse_ts_list(args.celery_timestamps) or list(DEFAULT_CELERY_TIMESTAMPS)
-        work.append(("CeLEry", CELERY_INFERENCE_ROOT, celery_ts))
+        celery_ts = (
+            _parse_ts_list(args.celery_timestamps)
+            or list(DEFAULT_CELERY_TIMESTAMPS.get(dataset, []))
+        )
+        if not celery_ts:
+            raise RuntimeError(
+                f"No CeLEry timestamps for dataset={dataset!r}. Add an "
+                f"entry to DEFAULT_CELERY_TIMESTAMPS or pass "
+                f"--celery_timestamps."
+            )
+        work.append(("CeLEry", celery_root, celery_ts))
 
     if not work:
         # Defensive: _parse_methods enforces non-empty, but if the

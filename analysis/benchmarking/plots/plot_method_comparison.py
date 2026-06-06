@@ -62,49 +62,75 @@ import _nature_style as ns
 # ──────────────────────────────────────────────────────────────────────
 
 ARTIFACTS_ROOT = Path("/nfs/team361/sb75/scgg-reproducibility/artifacts")
-DATASET = "mmc_luna"
+DEFAULT_DATASET = "mmc_luna"
+VALID_DATASETS = ("mmc_luna", "cns_luna")
 
-LUNA_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "luna_inference"
-SCGG_INFERENCE_ROOT   = ARTIFACTS_ROOT / DATASET / "scgg_inference"
-CELERY_INFERENCE_ROOT = ARTIFACTS_ROOT / DATASET / "celery_inference"
-
-# G2T (scGG) seeds — DEFAULT picks the canonical five by timestamp
-# because the scgg_inference tree contains more than five runs and we
-# need to pin which five form the published comparison. Override via
-# ``--scgg_timestamps ts1,ts2,...`` on the CLI.
+# Per-dataset default per-method timestamp lists. Keys are dataset
+# names; values are the canonical N seeds to plot. MUST match the
+# ones in compute_extended_metrics.py so the compute step scores the
+# same seeds the plot step pulls (change in one place, mirror the
+# other — or factor out to a shared config module if this drifts).
 #
-# Refreshed 2026-06-02: switched from the 20260530_133*** sweep to
-# the 20260530_165*** sweep (heads32_fastmds config, seeds 0–4).
-# Headline spearman_per_cell_median on these:
-#   seed0 → 0.469, seed1 → 0.469, seed2 → 0.477,
-#   seed3 → 0.469, seed4 → 0.478.
-# If you update this list, mirror the change in
-# compute_extended_metrics.py.DEFAULT_SCGG_TIMESTAMPS so the compute
-# step scores the same seeds the plot step pulls.
-DEFAULT_SCGG_TIMESTAMPS = [
-    "20260530_165200",  # seed 0
-    "20260530_165210",  # seed 1
-    "20260530_165216",  # seed 2
-    "20260530_165223",  # seed 3
-    "20260530_165229",  # seed 4
-]
+# Refreshed 2026-06-02 (MMC) and 2026-06-04 (CNS).
+DEFAULT_SCGG_TIMESTAMPS: dict[str, list[str]] = {
+    # MMC: 2026-05-30 heads32_fastmds seed0-4 sweep.
+    # Headline spearman_per_cell_median: 0.469 / 0.469 / 0.477 /
+    # 0.469 / 0.478.
+    "mmc_luna": [
+        "20260530_165200",  # seed 0
+        "20260530_165210",  # seed 1
+        "20260530_165216",  # seed 2
+        "20260530_165223",  # seed 3
+        "20260530_165229",  # seed 4
+    ],
+    # CNS: 2026-06-02 heads32_fastmds seed0-4 sweep on cns_luna.
+    "cns_luna": [
+        "20260602_142452",  # seed 0
+        "20260602_142505",  # seed 1
+        "20260602_142510",  # seed 2
+        "20260602_142516",  # seed 3
+        "20260602_142522",  # seed 4
+    ],
+}
 
-# CeLEry seeds — fixed list of the five PER-REFERENCE runs (seeds 0–4)
-# from the 2026-06-02 sweep. Pinned for the same reason the scgg list
-# is: celery_inference/ also contains the multi_slice variant on the
-# same dataset, and we want the published comparison to use exactly
-# the per_reference protocol (CeLEry's own default + how LUNA's paper
-# benchmarks the non-CeLEry baselines). Override via
-# ``--celery_timestamps`` to swap in the multi_slice runs.
-DEFAULT_CELERY_TIMESTAMPS = [
-    "20260602_074322",  # seed 0
-    "20260602_074327",  # seed 1
-    "20260602_074332",  # seed 2
-    "20260602_074336",  # seed 3
-    "20260602_074342",  # seed 4
-]
+# CeLEry default per-dataset — both lists are the PER-REFERENCE runs
+# (per_reference outperformed multi_slice on MMC, so it's the
+# canonical CeLEry protocol for this comparison). Override via
+# ``--celery_timestamps`` if you want to swap in multi_slice.
+DEFAULT_CELERY_TIMESTAMPS: dict[str, list[str]] = {
+    # MMC: 2026-06-02 per_reference seed0-4.
+    "mmc_luna": [
+        "20260602_074322",  # seed 0
+        "20260602_074327",  # seed 1
+        "20260602_074332",  # seed 2
+        "20260602_074336",  # seed 3
+        "20260602_074342",  # seed 4
+    ],
+    # CNS: 2026-06-04 per_reference seed0-4 (sagittal1/2/3 + spinalcord
+    # excluded; basement queue; bs=256; --cores 32 + OMP/MKL threads).
+    "cns_luna": [
+        "20260604_101049",  # seed 0
+        "20260604_141924",  # seed 1
+        "20260604_141952",  # seed 2
+        "20260604_142006",  # seed 3
+        "20260604_141959",  # seed 4
+    ],
+}
 
-OUT_DIR = ARTIFACTS_ROOT / DATASET / "comparison_plots"
+# LUNA default per-dataset: MMC = auto-discover (empty list falls
+# back to _discover_luna_timestamps); CNS = pin the 5 we want in the
+# figure (the cns_luna/luna_inference tree holds extra exploratory
+# runs we don't want).
+DEFAULT_LUNA_TIMESTAMPS: dict[str, list[str]] = {
+    "mmc_luna": [],
+    "cns_luna": [
+        "20260601_085512",  # seed 0
+        "20260601_085523",  # seed 1
+        "20260601_085535",  # seed 2
+        "20260601_085541",  # seed 3
+        "20260601_085547",  # seed 4
+    ],
+}
 
 # Filename of the per-timestamp aggregated CSV written by
 # compute_extended_metrics.py — single-row schema mirroring the
@@ -448,6 +474,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--dataset",
+        default=DEFAULT_DATASET,
+        choices=VALID_DATASETS,
+        help=(
+            f"Dataset slug (subdir of {ARTIFACTS_ROOT}). Default "
+            f"{DEFAULT_DATASET!r}. Selects both the inference roots "
+            f"to read AND the DEFAULT_*_TIMESTAMPS dicts' keys. The "
+            f"output figure lands in <ARTIFACTS_ROOT>/<dataset>/"
+            f"comparison_plots/."
+        ),
+    )
+    p.add_argument(
         "--scgg_timestamps",
         default=None,
         help=(
@@ -497,11 +535,36 @@ def _parse_ts_list(s: str | None) -> list[str] | None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    scgg_timestamps   = _parse_ts_list(args.scgg_timestamps)   or list(DEFAULT_SCGG_TIMESTAMPS)
-    celery_timestamps = _parse_ts_list(args.celery_timestamps) or list(DEFAULT_CELERY_TIMESTAMPS)
+    # Resolve dataset-derived paths + default timestamp lists.
+    dataset = args.dataset
+    luna_root   = ARTIFACTS_ROOT / dataset / "luna_inference"
+    scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
+    celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
+    out_dir     = ARTIFACTS_ROOT / dataset / "comparison_plots"
+    print(f"[plot_metrics] dataset = {dataset}")
+
+    scgg_timestamps = (
+        _parse_ts_list(args.scgg_timestamps)
+        or list(DEFAULT_SCGG_TIMESTAMPS.get(dataset, []))
+    )
+    if not scgg_timestamps:
+        raise RuntimeError(
+            f"No G2T timestamps for dataset={dataset!r}. Add an entry to "
+            f"DEFAULT_SCGG_TIMESTAMPS or pass --scgg_timestamps."
+        )
+    celery_timestamps = (
+        _parse_ts_list(args.celery_timestamps)
+        or list(DEFAULT_CELERY_TIMESTAMPS.get(dataset, []))
+    )
+    if not celery_timestamps:
+        raise RuntimeError(
+            f"No CeLEry timestamps for dataset={dataset!r}. Add an entry "
+            f"to DEFAULT_CELERY_TIMESTAMPS or pass --celery_timestamps."
+        )
     luna_timestamps = (
         _parse_ts_list(args.luna_timestamps)
-        or _discover_luna_timestamps(LUNA_INFERENCE_ROOT)
+        or list(DEFAULT_LUNA_TIMESTAMPS.get(dataset, []))
+        or _discover_luna_timestamps(luna_root)
     )
 
     print(f"[plot_metrics] LUNA timestamps ({len(luna_timestamps)}):")
@@ -514,13 +577,13 @@ def main(argv: list[str] | None = None) -> int:
     for ts in celery_timestamps:
         print(f"    {ts}")
 
-    g2t_df    = _collect("G2T",    SCGG_INFERENCE_ROOT,   scgg_timestamps)
-    luna_df   = _collect("LUNA",   LUNA_INFERENCE_ROOT,   luna_timestamps)
-    celery_df = _collect("CeLEry", CELERY_INFERENCE_ROOT, celery_timestamps)
+    g2t_df    = _collect("G2T",    scgg_root,   scgg_timestamps)
+    luna_df   = _collect("LUNA",   luna_root,   luna_timestamps)
+    celery_df = _collect("CeLEry", celery_root, celery_timestamps)
     df = pd.concat([g2t_df, luna_df, celery_df], ignore_index=True)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    processed_path = OUT_DIR / "g2t_vs_luna_vs_celery_extended_metrics_processed.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    processed_path = out_dir / "g2t_vs_luna_vs_celery_extended_metrics_processed.csv"
     df.to_csv(processed_path, index=False)
     print(f"[plot_metrics] saved processed CSV → {processed_path}")
 
@@ -582,9 +645,16 @@ def main(argv: list[str] | None = None) -> int:
     n_g2t    = df.loc[df["method"] == "G2T",    "timestamp"].nunique()
     n_luna   = df.loc[df["method"] == "LUNA",   "timestamp"].nunique()
     n_celery = df.loc[df["method"] == "CeLEry", "timestamp"].nunique()
+    # Human-friendly dataset label for the caption — fall back to the
+    # raw slug if we ever add a dataset the lookup doesn't know about.
+    _DATASET_DISPLAY = {
+        "mmc_luna": "MMC cortex",
+        "cns_luna": "Mouse CNS",
+    }
+    dataset_label = _DATASET_DISPLAY.get(dataset, dataset)
     fig.text(
         0.5, 0.03,
-        f"MMC cortex — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds) vs "
+        f"{dataset_label} — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds) vs "
         f"CeLEry ({n_celery} seeds). "
         f"Bar = mean across seeds, error bar = SEM, dots = individual seeds.",
         ha="center", va="center", fontsize=6.5, fontweight="medium",
@@ -592,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_stem = "g2t_vs_luna_vs_celery_extended_metrics"
     for ext in ("svg", "pdf", "png"):
-        out_path = OUT_DIR / f"{out_stem}.{ext}"
+        out_path = out_dir / f"{out_stem}.{ext}"
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)
         print(f"[plot_metrics] saved → {out_path}")
     plt.close(fig)

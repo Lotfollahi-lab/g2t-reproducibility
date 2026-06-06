@@ -32,6 +32,11 @@
 #                            files already exist and you just want to
 #                            re-render the figure with new style /
 #                            different timestamps.
+#   --dataset SLUG           Dataset to score + plot. One of:
+#                            mmc_luna (default), cns_luna. Forwarded
+#                            as --dataset to both compute + plot.
+#                            Also rebases OUT_DIR / log dir under
+#                            <artifacts>/<dataset>/comparison_plots/.
 #   --methods LIST           Comma-separated subset of methods to
 #                            (re-)score in the compute step:
 #                            luna, g2t (alias scgg), celery. Default
@@ -99,6 +104,9 @@ set -euo pipefail
 
 DRY_RUN=0
 SKIP_COMPUTE=0
+DATASET=""              # e.g. "cns_luna" → forwarded as --dataset to both
+                        # compute + plot. Empty = use the script default
+                        # (mmc_luna).
 METHODS=""              # e.g. "celery" → forwarded as compute's --methods
 SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
@@ -111,6 +119,8 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=1; shift ;;
         --skip_compute)
             SKIP_COMPUTE=1; shift ;;
+        --dataset)
+            DATASET="${2:?--dataset requires a value (mmc_luna|cns_luna)}"; shift 2 ;;
         --methods)
             # Subset to compute extended_metrics for; e.g. "celery" to
             # re-score ONLY the celery_inference tree (leaving the
@@ -168,7 +178,12 @@ LSF_QUEUE_FINAL="${LSF_QUEUE:-normal}"
 LSF_GROUP_FINAL="${LSF_GROUP:-team361}"
 
 ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
-OUT_DIR="$ARTIFACTS_ROOT/mmc_luna/comparison_plots"
+# OUT_DIR matches whatever --dataset selects (default: mmc_luna). Both
+# the python plot script and this wrapper compute the same dataset-aware
+# path — keep these in lockstep with plot_method_comparison.py's
+# DEFAULT_DATASET.
+DATASET_FINAL="${DATASET:-mmc_luna}"
+OUT_DIR="$ARTIFACTS_ROOT/$DATASET_FINAL/comparison_plots"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="$OUT_DIR/lsf_logs/$RUN_TS"
 mkdir -p "$LOG_DIR"
@@ -197,6 +212,9 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
         # leaving luna + scgg extended_metrics.csv untouched).
         # printf %q safely shell-quotes every value.
         printf 'python %q' "$COMPUTE_SCRIPT"
+        if [[ -n "$DATASET" ]]; then
+            printf ' --dataset %q' "$DATASET"
+        fi
         if [[ -n "$METHODS" ]]; then
             printf ' --methods %q' "$METHODS"
         fi
@@ -217,6 +235,9 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     # — the figure wouldn't make sense with only one bar. Forward any
     # explicit timestamp lists so plot + compute agree on which seeds.
     printf 'exec python %q' "$PLOT_SCRIPT"
+    if [[ -n "$DATASET" ]]; then
+        printf ' --dataset %q' "$DATASET"
+    fi
     if [[ -n "$SCGG_TIMESTAMPS" ]]; then
         printf ' --scgg_timestamps %q' "$SCGG_TIMESTAMPS"
     fi
@@ -242,6 +263,7 @@ echo "out dir         : $OUT_DIR"
 echo "log dir         : $LOG_DIR"
 echo "job script      : $JOB_SCRIPT"
 echo "skip compute    : $SKIP_COMPUTE"
+echo "dataset         : $DATASET_FINAL"
 [[ -n "$METHODS"           ]] && echo "methods         : $METHODS"
 [[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 [[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
