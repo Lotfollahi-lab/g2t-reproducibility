@@ -61,8 +61,10 @@ scripts pick up the new canonical seed set.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -276,35 +278,76 @@ def _score_timestamp(
     ts: str,
     inference_root: Path,
     method_label: str,
+    *,
+    vectorized: bool = True,
+    workers: int = 1,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    """Score every slice under one <TS> dir; return per-slice df + aggregate."""
+    """Score every slice under one <TS> dir; return per-slice df + aggregate.
+
+    Speedup knobs (both opt-in to non-default behaviour where they
+    matter):
+      vectorized: forwarded to evaluate_slice as ``spearman_vectorized``.
+                  Default True (the vectorised path is 10-50× faster on
+                  CNS-sized slices and produces identical per-cell rho).
+                  Set False to fall back to the original
+                  scipy.stats.spearmanr per-cell loop.
+      workers:    if > 1, parallelise the per-slice loop over
+                  ``min(workers, n_slices)`` worker processes via
+                  ProcessPoolExecutor. Default 1 keeps the original
+                  serial execution semantics.
+    """
     ts_root = inference_root / ts
     slice_dirs = _find_slice_dirs(ts_root)
     print(f"[compute_extended] {method_label} {ts}: "
-          f"{len(slice_dirs)} slice(s)")
+          f"{len(slice_dirs)} slice(s)"
+          f"{'  [vectorized]' if vectorized else '  [loop]'}"
+          f"{'' if workers == 1 else f'  [workers={workers}]'}",
+          flush=True)
+
+    # Each work unit is one slice. _score_one_slice is pure (reads its
+    # CSVs from disk, returns a dict) so it parallelises cleanly via
+    # ProcessPoolExecutor when workers > 1.
+    work_items = [(sd, ts, method_label, vectorized) for sd in slice_dirs]
 
     per_slice_rows: list[Dict[str, float]] = []
-    for sd in slice_dirs:
-        coords_true, coords_pred, cell_class, slice_name = _load_pair(sd)
-        row = evaluate_slice(
-            coords_true=coords_true,
-            coords_pred=coords_pred,
-            cell_class=cell_class,
-            contact_percentile=0.01,
-            compute_rssd=True,
-            rssd_projection="pca",   # ignored here because coords_pred is already 2-D
-        )
-        row["slice_name"] = slice_name
-        row["timestamp"] = ts
-        row["method"] = method_label
-        per_slice_rows.append(row)
-        print(
-            f"    {slice_name:40s} "
-            f"n={row['n_cells']:5d}  "
-            f"spr_med={row['spearman_per_cell_median']:.3f}  "
-            f"f1={row['f1']:.3f}  "
-            f"rssd={row['absolute_rssd']:.1f}"
-        )
+    if workers <= 1:
+        # Serial path — preserves the original execution semantics
+        # exactly (same print order, same memory peak) so a default
+        # run with workers=1 vectorized=False is byte-faithful to
+        # the old code.
+        for item in work_items:
+            row = _score_one_slice(*item)
+            per_slice_rows.append(row)
+            _print_slice_row(row)
+    else:
+        # Parallel path. We use ProcessPoolExecutor (not threads)
+        # because the per-cell Spearman is CPU-bound — even the
+        # vectorised path holds the GIL during numpy reductions on
+        # the big N×N matrices, so threads wouldn't help.
+        # ``max_workers`` is clamped against the work-unit count so
+        # a 32-core box scoring 8 slices doesn't spin up 32 idle
+        # workers.
+        max_workers = min(workers, len(work_items))
+        print(f"[compute_extended] launching {max_workers} parallel "
+              f"workers across {len(work_items)} slice(s)", flush=True)
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            # submit + as_completed so the print order tracks
+            # completion order (helpful for live progress visibility);
+            # the final per_slice_rows order is then resorted to
+            # the original slice_dirs ordering for deterministic CSV
+            # output.
+            future_to_idx = {
+                ex.submit(_score_one_slice, *item): idx
+                for idx, item in enumerate(work_items)
+            }
+            results: dict[int, Dict[str, float]] = {}
+            for fut in as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                row = fut.result()
+                results[idx] = row
+                _print_slice_row(row)
+        # Restore deterministic per-slice order.
+        per_slice_rows = [results[i] for i in range(len(work_items))]
 
     per_slice_df = pd.DataFrame(per_slice_rows)
     aggregate = aggregate_slices(per_slice_rows)
@@ -312,6 +355,47 @@ def _score_timestamp(
     aggregate["timestamp"] = ts
     aggregate["method"] = method_label
     return per_slice_df, aggregate
+
+
+def _score_one_slice(
+    slice_dir: Path,
+    ts: str,
+    method_label: str,
+    vectorized: bool,
+) -> Dict[str, float]:
+    """Score one slice. Pure function — picklable for multiprocessing.
+
+    Lives at module scope (not nested inside _score_timestamp) because
+    ProcessPoolExecutor pickles the function by qualified name; nested
+    functions are not picklable.
+    """
+    coords_true, coords_pred, cell_class, slice_name = _load_pair(slice_dir)
+    row = evaluate_slice(
+        coords_true=coords_true,
+        coords_pred=coords_pred,
+        cell_class=cell_class,
+        contact_percentile=0.01,
+        compute_rssd=True,
+        rssd_projection="pca",   # ignored here because coords_pred is already 2-D
+        spearman_vectorized=vectorized,
+    )
+    row["slice_name"] = slice_name
+    row["timestamp"] = ts
+    row["method"] = method_label
+    return row
+
+
+def _print_slice_row(row: Dict[str, float]) -> None:
+    """One-line per-slice progress log line. Factored out of the
+    serial / parallel branches so the format stays in lockstep."""
+    print(
+        f"    {row['slice_name']:40s} "
+        f"n={int(row['n_cells']):5d}  "
+        f"spr_med={row['spearman_per_cell_median']:.3f}  "
+        f"f1={row['f1']:.3f}  "
+        f"rssd={row['absolute_rssd']:.1f}",
+        flush=True,
+    )
 
 
 def _write_outputs(
@@ -416,6 +500,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Skip timestamps whose extended_metrics.csv already exists. "
             "Off by default — by default we re-score and overwrite to "
             "pick up metric-implementation changes."
+        ),
+    )
+    p.add_argument(
+        "--workers", type=int, default=1,
+        help=(
+            "Process-pool size for the per-slice loop. Default 1 "
+            "(serial). >1 enables ProcessPoolExecutor parallelism — "
+            "use 8-16 on CNS for a 4-8× speedup. Capped per timestamp "
+            "to ``min(workers, n_slices)`` so you don't spin up idle "
+            "workers. Memory note: each worker independently builds "
+            "two N×N float32 distance matrices for its current slice "
+            "(~180 GB peak for N=150k), so set workers conservatively "
+            "if multiple workers might score the largest slices at "
+            "the same time."
+        ),
+    )
+    p.add_argument(
+        "--no_vectorize",
+        action="store_true",
+        help=(
+            "Disable the vectorised per-cell Spearman path; fall back "
+            "to the original scipy.stats.spearmanr per-cell loop. The "
+            "two paths produce identical per-cell rho (see the "
+            "regression test in scgg/tests/test_per_cell_spearman_"
+            "vectorized.py) — this flag exists only as a debugging "
+            "escape hatch / for reproducing the pre-vectorisation "
+            "metric values exactly."
         ),
     )
     return p.parse_args(argv)
@@ -524,6 +635,29 @@ def main(argv: list[str] | None = None) -> int:
         for t in ts_list:
             print(f"    {t}")
 
+    # Resolve speedup knobs once and log them so it's obvious in the
+    # LSF stdout which path is running.
+    vectorized = not args.no_vectorize
+    workers = max(1, int(args.workers))
+    print(
+        f"[compute_extended] speedup knobs: "
+        f"vectorized={vectorized} workers={workers}"
+    )
+    # When workers > 1 the per-process BLAS threading would multiply
+    # against the worker count and oversubscribe the box. Pin each
+    # worker to a single BLAS thread so the total thread count stays
+    # roughly equal to ``workers``.  Honour the user's explicit
+    # OMP_NUM_THREADS if it was set by the caller (e.g. submit_pipeline.sh
+    # exports OMP_NUM_THREADS=$LSF_CORES_FINAL).
+    if workers > 1 and "OMP_NUM_THREADS" not in os.environ:
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        print(
+            "[compute_extended] pinned OMP/MKL/OPENBLAS to 1 thread per "
+            "worker to avoid CPU oversubscription"
+        )
+
     n_done = 0
     n_skipped = 0
     n_failed = 0
@@ -537,7 +671,10 @@ def main(argv: list[str] | None = None) -> int:
                 n_skipped += 1
                 continue
             try:
-                per_slice_df, aggregate = _score_timestamp(ts, root, method_label)
+                per_slice_df, aggregate = _score_timestamp(
+                    ts, root, method_label,
+                    vectorized=vectorized, workers=workers,
+                )
                 _write_outputs(ts, root, per_slice_df, aggregate)
                 n_done += 1
             except Exception as exc:

@@ -58,6 +58,16 @@
 #   --celery_timestamps LIST Comma-separated YYYYMMDD_HHMMSS timestamps
 #                            to load from celery_inference/. Defaults
 #                            to the hardcoded per_reference seeds list.
+#   --workers N              Process-pool size for the per-slice loop in
+#                            the compute step (passed through as
+#                            --workers N). >1 enables multiprocessing —
+#                            biggest win on CNS where each slice is slow.
+#                            Default unset = serial (1 worker).
+#   --no_vectorize           Disable the vectorised per-cell Spearman
+#                            path in the compute step. Default is
+#                            vectorised (10-50× faster). Only set this
+#                            if you want to reproduce the pre-vectorisation
+#                            metric values exactly for an A/B comparison.
 #   --wall HH:MM             LSF wall-clock cap. Default: 12:00 (12 h).
 #                            Drop to 00:30 if you've already run with
 #                            --skip_compute and just want a fast
@@ -111,6 +121,12 @@ METHODS=""              # e.g. "celery" → forwarded as compute's --methods
 SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
 CELERY_TIMESTAMPS=""
+WORKERS=""              # >1 → ProcessPoolExecutor in the compute step.
+                        # Combined with --vectorize_off, this is the main
+                        # CNS speedup knob.
+VECTORIZE_OFF=0         # 1 → forward --no_vectorize to compute step
+                        # (fall back to the original per-cell spearmanr
+                        # loop). Default 0 = vectorised (10-50× faster).
 WALL_ARG=""
 MEM_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -133,6 +149,10 @@ while [[ $# -gt 0 ]]; do
             LUNA_TIMESTAMPS="${2:?--luna_timestamps requires a value}"; shift 2 ;;
         --celery_timestamps)
             CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
+        --workers)
+            WORKERS="${2:?--workers requires a positive integer}"; shift 2 ;;
+        --no_vectorize)
+            VECTORIZE_OFF=1; shift ;;
         --wall)
             WALL_ARG="${2:?--wall requires a value, e.g. 24:00}"; shift 2 ;;
         --mem)
@@ -201,6 +221,15 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     echo "# Re-runnable: bash $JOB_SCRIPT"
     echo "set -euo pipefail"
     echo
+    # Force unbuffered stdout/stderr so the compute step's per-slice
+    # progress lines reach the LSF log file in real time. Without this
+    # the CPython runtime block-buffers stdout when it's redirected to
+    # a file (which is what bsub does), and you can wait HOURS without
+    # seeing any output even though the job is making progress — and
+    # then think the job is stuck. PYTHONUNBUFFERED=1 is the env-var
+    # equivalent of running ``python -u``.
+    echo "export PYTHONUNBUFFERED=1"
+    echo
     printf 'source %q\n' "$VENV_PATH/bin/activate"
     echo
     if [[ "$SKIP_COMPUTE" == "0" ]]; then
@@ -226,6 +255,12 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
         fi
         if [[ -n "$CELERY_TIMESTAMPS" ]]; then
             printf ' --celery_timestamps %q' "$CELERY_TIMESTAMPS"
+        fi
+        if [[ -n "$WORKERS" ]]; then
+            printf ' --workers %q' "$WORKERS"
+        fi
+        if [[ "$VECTORIZE_OFF" == "1" ]]; then
+            printf ' --no_vectorize'
         fi
         printf '\n'
         echo
@@ -268,6 +303,8 @@ echo "dataset         : $DATASET_FINAL"
 [[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 [[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
 [[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
+[[ -n "$WORKERS"           ]] && echo "workers         : $WORKERS"
+[[ "$VECTORIZE_OFF" == "1" ]] && echo "vectorize       : OFF (using scipy loop)"
 echo "wall            : $WALL_FINAL"
 echo "mem (MB)        : $MEM_FINAL"
 echo "dry run         : $DRY_RUN"
