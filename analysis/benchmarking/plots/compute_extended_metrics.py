@@ -517,16 +517,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--no_vectorize",
+        "--vectorize",
         action="store_true",
         help=(
-            "Disable the vectorised per-cell Spearman path; fall back "
-            "to the original scipy.stats.spearmanr per-cell loop. The "
-            "two paths produce identical per-cell rho (see the "
-            "regression test in scgg/tests/test_per_cell_spearman_"
-            "vectorized.py) — this flag exists only as a debugging "
-            "escape hatch / for reproducing the pre-vectorisation "
-            "metric values exactly."
+            "Enable the vectorised per-cell Spearman path. OFF by "
+            "default so re-running this script over already-scored "
+            "MMC (or any other existing) timestamps does NOT change "
+            "the metric values — the default path is the original "
+            "scipy.stats.spearmanr per-cell loop. Pass --vectorize "
+            "to opt into the 10-50× faster batched-rankdata + "
+            "row-wise Pearson implementation. Output is "
+            "mathematically identical within float tolerance "
+            "(regression test in "
+            "scgg/tests/test_per_cell_spearman_vectorized.py)."
         ),
     )
     return p.parse_args(argv)
@@ -636,8 +639,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {t}")
 
     # Resolve speedup knobs once and log them so it's obvious in the
-    # LSF stdout which path is running.
-    vectorized = not args.no_vectorize
+    # LSF stdout which path is running. Defaults preserve the original
+    # behaviour: serial workers, loop-based Spearman. Both speedups
+    # are explicit opt-ins so re-running this script over already-
+    # scored timestamps cannot silently shift their metric values.
+    vectorized = bool(args.vectorize)
     workers = max(1, int(args.workers))
     print(
         f"[compute_extended] speedup knobs: "

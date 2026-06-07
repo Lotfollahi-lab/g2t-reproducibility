@@ -63,11 +63,14 @@
 #                            --workers N). >1 enables multiprocessing —
 #                            biggest win on CNS where each slice is slow.
 #                            Default unset = serial (1 worker).
-#   --no_vectorize           Disable the vectorised per-cell Spearman
-#                            path in the compute step. Default is
-#                            vectorised (10-50× faster). Only set this
-#                            if you want to reproduce the pre-vectorisation
-#                            metric values exactly for an A/B comparison.
+#   --vectorize              Enable the vectorised per-cell Spearman
+#                            path in the compute step. OFF by default
+#                            so re-scoring already-completed timestamps
+#                            (e.g. MMC) cannot change their metric
+#                            values. Pass this flag for fresh CNS runs
+#                            to get the 10-50× speedup (mathematically
+#                            identical within float tolerance — see
+#                            test_per_cell_spearman_vectorized.py).
 #   --wall HH:MM             LSF wall-clock cap. Default: 12:00 (12 h).
 #                            Drop to 00:30 if you've already run with
 #                            --skip_compute and just want a fast
@@ -122,11 +125,14 @@ SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
 CELERY_TIMESTAMPS=""
 WORKERS=""              # >1 → ProcessPoolExecutor in the compute step.
-                        # Combined with --vectorize_off, this is the main
+                        # Combined with --vectorize, this is the main
                         # CNS speedup knob.
-VECTORIZE_OFF=0         # 1 → forward --no_vectorize to compute step
-                        # (fall back to the original per-cell spearmanr
-                        # loop). Default 0 = vectorised (10-50× faster).
+VECTORIZE_ON=0          # 1 → forward --vectorize to compute step.
+                        # Default 0 = original scipy.stats.spearmanr
+                        # per-cell loop (preserves byte-identical metric
+                        # values for already-scored timestamps). Pass
+                        # --vectorize to opt INTO the 10-50× faster
+                        # batched-rankdata path.
 WALL_ARG=""
 MEM_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -151,8 +157,8 @@ while [[ $# -gt 0 ]]; do
             CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
         --workers)
             WORKERS="${2:?--workers requires a positive integer}"; shift 2 ;;
-        --no_vectorize)
-            VECTORIZE_OFF=1; shift ;;
+        --vectorize)
+            VECTORIZE_ON=1; shift ;;
         --wall)
             WALL_ARG="${2:?--wall requires a value, e.g. 24:00}"; shift 2 ;;
         --mem)
@@ -259,8 +265,8 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
         if [[ -n "$WORKERS" ]]; then
             printf ' --workers %q' "$WORKERS"
         fi
-        if [[ "$VECTORIZE_OFF" == "1" ]]; then
-            printf ' --no_vectorize'
+        if [[ "$VECTORIZE_ON" == "1" ]]; then
+            printf ' --vectorize'
         fi
         printf '\n'
         echo
@@ -304,7 +310,7 @@ echo "dataset         : $DATASET_FINAL"
 [[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
 [[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
 [[ -n "$WORKERS"           ]] && echo "workers         : $WORKERS"
-[[ "$VECTORIZE_OFF" == "1" ]] && echo "vectorize       : OFF (using scipy loop)"
+[[ "$VECTORIZE_ON" == "1" ]] && echo "vectorize       : ON (batched rankdata path)"
 echo "wall            : $WALL_FINAL"
 echo "mem (MB)        : $MEM_FINAL"
 echo "dry run         : $DRY_RUN"
