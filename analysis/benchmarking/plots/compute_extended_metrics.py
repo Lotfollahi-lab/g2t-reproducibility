@@ -532,6 +532,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "scgg/tests/test_per_cell_spearman_vectorized.py)."
         ),
     )
+    p.add_argument(
+        "--list_work",
+        action="store_true",
+        help=(
+            "Print the (method, timestamp) work plan and exit "
+            "WITHOUT scoring anything. One line per work unit, "
+            "TAB-separated: ``<method>\\t<timestamp>``. The fanout "
+            "LSF wrapper (submit_compute_extended_fanout.sh) consumes "
+            "this so the per-method/per-timestamp defaults stay in "
+            "one place (this .py file) rather than being duplicated "
+            "in bash."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -631,6 +644,18 @@ def main(argv: list[str] | None = None) -> int:
         print("[compute_extended] ERROR: no methods selected after parsing "
               f"--methods={args.methods!r}", file=sys.stderr)
         return 2
+
+    # --list_work: dump the work plan as TAB-separated lines and exit.
+    # Used by submit_compute_extended_fanout.sh to drive one LSF job
+    # per (method, timestamp) pair without duplicating the default
+    # timestamp lists in bash. Print to stdout so the wrapper can
+    # capture with $(python ... --list_work). No header — keep it
+    # easy to parse.
+    if args.list_work:
+        for label, _, ts_list in work:
+            for t in ts_list:
+                print(f"{label}\t{t}")
+        return 0
 
     print(f"[compute_extended] methods to score: {[m for m, _, _ in work]}")
     for label, _, ts_list in work:
