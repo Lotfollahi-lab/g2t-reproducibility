@@ -99,6 +99,13 @@
 #                              3. bash submit_plot_method_comparison.sh \\
 #                                     --dataset <DS> --skip_compute
 #   --queue NAME             LSF queue. Default basement.
+#   --group|-g NAME          LSF cost-code group (-G). Default
+#                            ``team361`` (works on normal/long/
+#                            basement CPU queues). GPU/AI queues
+#                            (training-parallel, gpu-inference, ...)
+#                            usually need ``--group s10396`` instead.
+#                            Also honours $LSF_GROUP if --group is
+#                            omitted.
 #   --wall HH:MM             Per-job wall cap. Default 12:00.
 #   --mem MB                 Per-job memory cap. Default 256000.
 #   --cores N                Per-job LSF -n. Default = ``workers``.
@@ -131,6 +138,12 @@ SUFFIX=""               # per-CSV basename suffix, forwarded to each
 WORKERS=4
 SKIP_EXISTING=0
 QUEUE_ARG="basement"
+GROUP_ARG=""            # bsub -G value. Empty falls back to the
+                        # LSF_GROUP env var, which itself defaults to
+                        # team361 below. Override per-invocation with
+                        # --group / -g — e.g. ``--group s10396`` for
+                        # GPU/AI queues that reject non-sXXXX cost-code
+                        # groups.
 WALL_ARG="12:00"
 MEM_ARG="256000"
 CORES_ARG=""
@@ -158,6 +171,7 @@ while [[ $# -gt 0 ]]; do
         --workers)       WORKERS="${2:?--workers requires a value}"; shift 2 ;;
         --skip_existing) SKIP_EXISTING=1; shift ;;
         --queue|-q)      QUEUE_ARG="${2:?--queue requires a value}"; shift 2 ;;
+        --group|-g)      GROUP_ARG="${2:?--group requires a value}"; shift 2 ;;
         --wall)          WALL_ARG="${2:?--wall requires a value}"; shift 2 ;;
         --mem)           MEM_ARG="${2:?--mem requires a value}"; shift 2 ;;
         --cores)         CORES_ARG="${2:?--cores requires a value}"; shift 2 ;;
@@ -198,7 +212,12 @@ if [[ ! -f "$COMPUTE_SCRIPT" ]]; then
 fi
 
 VENV_PATH="${VENV_PATH:-/nfs/team361/sb75/.venvs/scgg}"
-LSF_GROUP_FINAL="${LSF_GROUP:-team361}"
+# Resolution order: explicit --group CLI flag > LSF_GROUP env var >
+# team361 default. team361 works on the normal/long/basement CPU
+# queues but most GPU/AI queues (training-parallel, gpu-inference,
+# ...) demand the sXXXX cost-code group instead — override with
+# ``--group s10396`` for those.
+LSF_GROUP_FINAL="${GROUP_ARG:-${LSF_GROUP:-team361}}"
 
 # Resolve artifacts root for log placement. Mirrors
 # submit_plot_method_comparison.sh's lookup so fanout + plot logs end

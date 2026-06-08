@@ -152,12 +152,17 @@ VECTORIZE_ON=0          # 1 → forward --vectorize to compute step.
                         # batched-rankdata path.
 WALL_ARG=""
 MEM_ARG=""
+GROUP_ARG=""            # CLI override for the bsub -G value. Empty
+                        # falls back to $LSF_GROUP env or team361
+                        # default below.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry_run)
             DRY_RUN=1; shift ;;
         --skip_compute)
             SKIP_COMPUTE=1; shift ;;
+        --group|-g)
+            GROUP_ARG="${2:?--group requires a value (e.g. team361, s10396)}"; shift 2 ;;
         --dataset)
             DATASET="${2:?--dataset requires a value (mmc_luna|cns_luna)}"; shift 2 ;;
         --methods)
@@ -220,7 +225,8 @@ VENV_PATH="${VENV_PATH:-/nfs/team361/sb75/.venvs/scgg}"
 LSF_QUEUE_FINAL="${LSF_QUEUE:-normal}"
 # normal queue rejects sXXXX (AI-acceleration) cost-code groups; use the
 # project group instead. Set LSF_GROUP=<other> in the env to override.
-LSF_GROUP_FINAL="${LSF_GROUP:-team361}"
+# CLI --group / -g wins over $LSF_GROUP, which wins over team361.
+LSF_GROUP_FINAL="${GROUP_ARG:-${LSF_GROUP:-team361}}"
 
 ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
 # OUT_DIR matches whatever --dataset selects (default: mmc_luna). Both
