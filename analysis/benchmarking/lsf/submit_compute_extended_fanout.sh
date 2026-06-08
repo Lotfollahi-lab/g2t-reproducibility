@@ -34,6 +34,15 @@
 #                            out: luna, g2t, celery. Default = all
 #                            three. Use this to redo only one method
 #                            (e.g. ``--methods celery``).
+#   --luna_timestamps  LIST  Per-method timestamp override. Comma-
+#   --scgg_timestamps  LIST  separated list; only those timestamps
+#   --celery_timestamps LIST get fanned out for the matching method.
+#                            Use this to recover specific failed jobs
+#                            (e.g. wall-time exceeded) without
+#                            re-running the ones that finished. May
+#                            be combined freely — e.g.
+#                            ``--celery_timestamps a,b --scgg_timestamps c``
+#                            fires 3 jobs total.
 #   --vectorize              Forward --vectorize to every job (10-50×
 #                            faster Spearman). Output is bit-faithful
 #                            to the loop within float tolerance. OFF
@@ -72,6 +81,13 @@ set -euo pipefail
 
 DATASET="mmc_luna"
 METHODS=""
+# Per-method timestamp overrides — recovery use-case: re-fire only the
+# specific (method, ts) pairs that failed in a previous fanout (e.g.
+# wall-time limit). Each forwards verbatim to both --list_work and the
+# matching per-job ``--<method>_timestamps`` flag.
+LUNA_TIMESTAMPS=""
+SCGG_TIMESTAMPS=""
+CELERY_TIMESTAMPS=""
 VECTORIZE=0
 WORKERS=4
 SKIP_EXISTING=0
@@ -85,6 +101,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dataset)       DATASET="${2:?--dataset requires a value}"; shift 2 ;;
         --methods)       METHODS="${2:?--methods requires a value}"; shift 2 ;;
+        --luna_timestamps)
+            LUNA_TIMESTAMPS="${2:?--luna_timestamps requires a value}"; shift 2 ;;
+        --scgg_timestamps)
+            SCGG_TIMESTAMPS="${2:?--scgg_timestamps requires a value}"; shift 2 ;;
+        --celery_timestamps)
+            CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
         --vectorize)     VECTORIZE=1; shift ;;
         --workers)       WORKERS="${2:?--workers requires a value}"; shift 2 ;;
         --skip_existing) SKIP_EXISTING=1; shift ;;
@@ -137,6 +159,20 @@ LIST_ARGS=( --dataset "$DATASET" --list_work )
 if [[ -n "$METHODS" ]]; then
     LIST_ARGS+=( --methods "$METHODS" )
 fi
+# Per-method timestamp overrides — these make the work plan
+# specifically target a subset (e.g. only the timestamps that failed
+# in a previous run). Forwarded ONLY to --list_work; the per-job
+# bsubs below already pass --<method>_timestamps=<single_ts> built
+# from the work-plan rows.
+if [[ -n "$LUNA_TIMESTAMPS" ]]; then
+    LIST_ARGS+=( --luna_timestamps "$LUNA_TIMESTAMPS" )
+fi
+if [[ -n "$SCGG_TIMESTAMPS" ]]; then
+    LIST_ARGS+=( --scgg_timestamps "$SCGG_TIMESTAMPS" )
+fi
+if [[ -n "$CELERY_TIMESTAMPS" ]]; then
+    LIST_ARGS+=( --celery_timestamps "$CELERY_TIMESTAMPS" )
+fi
 echo "================================================================"
 echo "  submit_compute_extended_fanout.sh"
 echo "================================================================"
@@ -144,6 +180,9 @@ echo "compute script  : $COMPUTE_SCRIPT"
 echo "venv            : $VENV_PATH"
 echo "dataset         : $DATASET"
 echo "methods         : ${METHODS:-(all)}"
+[[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
+[[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
+[[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
 echo "vectorize       : $VECTORIZE"
 echo "workers per job : $WORKERS"
 echo "skip_existing   : $SKIP_EXISTING"
@@ -212,14 +251,24 @@ while IFS=$'\t' read -r METHOD TS; do
         # the log file looks empty for hours — same trap we hit on the
         # plot wrapper, hence the matching fix here).
         echo "export PYTHONUNBUFFERED=1"
-        # Match BLAS/OpenMP threads to the LSF -n so the inner numpy
-        # einsum / rankdata calls use the cores we asked for. The
-        # compute_extended_metrics.py main() will pin these to 1 if
-        # workers > 1 (to prevent oversubscription); ours sets the
-        # ceiling for the single-worker case.
-        printf 'export OMP_NUM_THREADS=%q\n'      "$CORES_FINAL"
-        printf 'export MKL_NUM_THREADS=%q\n'      "$CORES_FINAL"
-        printf 'export OPENBLAS_NUM_THREADS=%q\n' "$CORES_FINAL"
+        # BLAS / OpenMP thread count. Two regimes:
+        #   - workers == 1: serial Python — let the inner numpy einsum
+        #     / rankdata calls use ALL the LSF cores.
+        #   - workers >  1: ProcessPoolExecutor — each worker should be
+        #     single-threaded, otherwise workers × cores threads
+        #     oversubscribe the box and PESSIMIZE the wall time
+        #     (this was the bug that contributed to the original
+        #     wall-time blowups: cores=16, workers=4, OMP=16 →
+        #     64 threads thrashing on a 16-core box).
+        if [[ "$WORKERS" -le 1 ]]; then
+            printf 'export OMP_NUM_THREADS=%q\n'      "$CORES_FINAL"
+            printf 'export MKL_NUM_THREADS=%q\n'      "$CORES_FINAL"
+            printf 'export OPENBLAS_NUM_THREADS=%q\n' "$CORES_FINAL"
+        else
+            echo 'export OMP_NUM_THREADS=1'
+            echo 'export MKL_NUM_THREADS=1'
+            echo 'export OPENBLAS_NUM_THREADS=1'
+        fi
         echo
         printf 'source %q\n' "$VENV_PATH/bin/activate"
         echo
