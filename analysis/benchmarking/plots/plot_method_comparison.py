@@ -285,16 +285,20 @@ def _collect(
     method: str,
     inference_root: Path,
     timestamps: list[str],
+    extended_filename: str = EXTENDED_METRICS_FILENAME,
 ) -> pd.DataFrame:
     """Long-form DataFrame: one row per (method, timestamp, metric, value).
 
-    Loads each timestamp's extended_metrics.csv once, then unpacks all
+    Loads each timestamp's extended_metrics CSV once, then unpacks all
     METRICS columns. Missing columns become NaN so the plot can still
-    render the panels for metrics that DO have data.
+    render the panels for metrics that DO have data. ``extended_filename``
+    defaults to the canonical ``extended_metrics.csv``; pass a
+    suffixed variant (e.g. ``extended_metrics_gpu.csv``) to read from
+    a parallel score sheet.
     """
     rows: list[dict] = []
     for ts in timestamps:
-        csv_path = inference_root / ts / EXTENDED_METRICS_FILENAME
+        csv_path = inference_root / ts / extended_filename
         row = _load_extended_row(csv_path)
         for spec in METRICS:
             value = float(row[spec.column]) if spec.column in row.index else float("nan")
@@ -515,6 +519,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "use the multi-slice sweep instead pass those TS here."
         ),
     )
+    p.add_argument(
+        "--suffix",
+        default="",
+        help=(
+            "Per-timestamp CSV basename suffix. Default empty reads "
+            "``extended_metrics.csv`` (the canonical file the scipy "
+            "backend writes). Pass the same value you gave to "
+            "``compute_extended_metrics.py --suffix`` to render from "
+            "a parallel CSV — e.g. ``--suffix gpu`` reads "
+            "``extended_metrics_gpu.csv`` from each timestamp dir. "
+            "Output filenames (g2t_vs_luna_vs_celery_extended_metrics"
+            "<_suffix>.{svg,pdf,png}) get the same suffix so multiple "
+            "backends produce side-by-side comparison figures."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -577,13 +596,27 @@ def main(argv: list[str] | None = None) -> int:
     for ts in celery_timestamps:
         print(f"    {ts}")
 
-    g2t_df    = _collect("G2T",    scgg_root,   scgg_timestamps)
-    luna_df   = _collect("LUNA",   luna_root,   luna_timestamps)
-    celery_df = _collect("CeLEry", celery_root, celery_timestamps)
+    # Resolve the per-timestamp CSV filename from --suffix. Default
+    # empty preserves the historical 'extended_metrics.csv' lookup; a
+    # non-empty suffix reads e.g. 'extended_metrics_gpu.csv' instead.
+    # Strip any user-supplied leading '_' so '--suffix _gpu' == '--suffix gpu'.
+    suffix = (args.suffix or "").lstrip("_")
+    if suffix:
+        ext_filename = f"extended_metrics_{suffix}.csv"
+        print(f"[plot_metrics] reading suffixed CSVs: {ext_filename}")
+    else:
+        ext_filename = EXTENDED_METRICS_FILENAME
+
+    g2t_df    = _collect("G2T",    scgg_root,   scgg_timestamps,   ext_filename)
+    luna_df   = _collect("LUNA",   luna_root,   luna_timestamps,   ext_filename)
+    celery_df = _collect("CeLEry", celery_root, celery_timestamps, ext_filename)
     df = pd.concat([g2t_df, luna_df, celery_df], ignore_index=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    processed_path = out_dir / "g2t_vs_luna_vs_celery_extended_metrics_processed.csv"
+    # Tag the output figure + processed CSV with the same suffix so
+    # multiple backend renders can coexist in comparison_plots/.
+    out_tag = f"_{suffix}" if suffix else ""
+    processed_path = out_dir / f"g2t_vs_luna_vs_celery_extended_metrics{out_tag}_processed.csv"
     df.to_csv(processed_path, index=False)
     print(f"[plot_metrics] saved processed CSV → {processed_path}")
 
@@ -660,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
         ha="center", va="center", fontsize=6.5, fontweight="medium",
     )
 
-    out_stem = "g2t_vs_luna_vs_celery_extended_metrics"
+    out_stem = f"g2t_vs_luna_vs_celery_extended_metrics{out_tag}"
     for ext in ("svg", "pdf", "png"):
         out_path = out_dir / f"{out_stem}.{ext}"
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)

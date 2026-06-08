@@ -58,6 +58,18 @@
 #   --celery_timestamps LIST Comma-separated YYYYMMDD_HHMMSS timestamps
 #                            to load from celery_inference/. Defaults
 #                            to the hardcoded per_reference seeds list.
+#   --suffix SUFFIX          Optional CSV basename suffix forwarded to
+#                            BOTH compute (write) and plot (read). Use
+#                            this to A/B-compare backends — e.g. pair
+#                            with the fanout wrapper's
+#                            ``--backend gpu --suffix gpu`` then plot
+#                            with ``--suffix gpu`` to render from
+#                            ``extended_metrics_gpu.csv``. Output
+#                            figure filename also gets the suffix
+#                            (``g2t_vs_luna_vs_celery_extended_metrics
+#                            _<SUFFIX>.{svg,pdf,png}``) so multiple
+#                            backend renders coexist in the
+#                            comparison_plots/ dir.
 #   --workers N              Process-pool size for the per-slice loop in
 #                            the compute step (passed through as
 #                            --workers N). >1 enables multiprocessing —
@@ -124,6 +136,11 @@ METHODS=""              # e.g. "celery" → forwarded as compute's --methods
 SCGG_TIMESTAMPS=""
 LUNA_TIMESTAMPS=""
 CELERY_TIMESTAMPS=""
+SUFFIX=""               # per-CSV basename suffix, forwarded to both
+                        # compute (write) + plot (read). Empty = default
+                        # extended_metrics.csv path; non-empty pairs
+                        # the wrapper with a backend run from the
+                        # fanout (e.g. --suffix gpu).
 WORKERS=""              # >1 → ProcessPoolExecutor in the compute step.
                         # Combined with --vectorize, this is the main
                         # CNS speedup knob.
@@ -155,6 +172,8 @@ while [[ $# -gt 0 ]]; do
             LUNA_TIMESTAMPS="${2:?--luna_timestamps requires a value}"; shift 2 ;;
         --celery_timestamps)
             CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
+        --suffix)
+            SUFFIX="${2:?--suffix requires a value (e.g. gpu, numba)}"; shift 2 ;;
         --workers)
             WORKERS="${2:?--workers requires a positive integer}"; shift 2 ;;
         --vectorize)
@@ -268,6 +287,9 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
         if [[ "$VECTORIZE_ON" == "1" ]]; then
             printf ' --vectorize'
         fi
+        if [[ -n "$SUFFIX" ]]; then
+            printf ' --suffix %q' "$SUFFIX"
+        fi
         printf '\n'
         echo
     fi
@@ -287,6 +309,9 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     fi
     if [[ -n "$CELERY_TIMESTAMPS" ]]; then
         printf ' --celery_timestamps %q' "$CELERY_TIMESTAMPS"
+    fi
+    if [[ -n "$SUFFIX" ]]; then
+        printf ' --suffix %q' "$SUFFIX"
     fi
     printf '\n'
 } > "$JOB_SCRIPT"
@@ -309,6 +334,7 @@ echo "dataset         : $DATASET_FINAL"
 [[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 [[ -n "$LUNA_TIMESTAMPS"   ]] && echo "luna_timestamps : $LUNA_TIMESTAMPS"
 [[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
+[[ -n "$SUFFIX"            ]] && echo "suffix          : $SUFFIX"
 [[ -n "$WORKERS"           ]] && echo "workers         : $WORKERS"
 [[ "$VECTORIZE_ON" == "1" ]] && echo "vectorize       : ON (batched rankdata path)"
 echo "wall            : $WALL_FINAL"

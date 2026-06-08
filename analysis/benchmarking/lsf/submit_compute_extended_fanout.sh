@@ -43,10 +43,45 @@
 #                            be combined freely — e.g.
 #                            ``--celery_timestamps a,b --scgg_timestamps c``
 #                            fires 3 jobs total.
-#   --vectorize              Forward --vectorize to every job (10-50×
-#                            faster Spearman). Output is bit-faithful
-#                            to the loop within float tolerance. OFF
-#                            by default for backward-compat.
+#   --vectorize              Legacy alias for ``--backend vectorized``.
+#                            Ignored if --backend is also given.
+#   --backend BACKEND        Per-cell Spearman backend forwarded to
+#                            each compute job. One of:
+#                              scipy       — original loop, baseline
+#                                            (default; bit-faithful)
+#                              vectorized  — batched rankdata + einsum
+#                                            (5-20× faster, CPU)
+#                              numba       — JIT'd CPU with average-tie
+#                                            ranking (5-15× faster,
+#                                            needs `numba`)
+#                              gpu         — chunked torch on CUDA
+#                                            (30-100× faster, needs
+#                                            GPU; ties drift ~1e-3)
+#                            When --backend gpu is used, this wrapper
+#                            AUTO-adds ``-gpu num=1:gmem=20000`` to
+#                            the bsub. Override with --gpu if you need
+#                            a different request string. You still
+#                            need to pass an appropriate --queue
+#                            (e.g. ``--queue gpu-inference``).
+#   --gpu STR                bsub -gpu request string. Default empty
+#                            (no GPU request) for CPU backends; auto-
+#                            set to ``num=1:gmem=20000`` when
+#                            --backend gpu. Common overrides:
+#                              num=1:gmem=80000   (require ≥80 GB GPU,
+#                                                  pins to A100/H100/H200)
+#                              num=1              (any visible GPU)
+#   --suffix SUFFIX          Optional CSV filename tag forwarded to
+#                            every per-job python invocation. Writes
+#                            ``extended_metrics_<SUFFIX>.csv`` per
+#                            timestamp instead of the canonical
+#                            ``extended_metrics.csv``. Use this to
+#                            A/B-compare backends without overwriting
+#                            the existing scipy-scored CSVs — e.g.
+#                            ``--backend gpu --suffix gpu`` writes
+#                            extended_metrics_gpu.csv side-by-side
+#                            with the original. The plot wrapper has
+#                            a matching --suffix flag; pass the same
+#                            value there to render from those CSVs.
 #   --workers N              Per-job ProcessPoolExecutor size for the
 #                            slice loop. Default 4. Each job's peak
 #                            memory ≈ N_workers × ~180 GB worst slice.
@@ -89,12 +124,20 @@ LUNA_TIMESTAMPS=""
 SCGG_TIMESTAMPS=""
 CELERY_TIMESTAMPS=""
 VECTORIZE=0
+BACKEND=""              # one of scipy|vectorized|numba|gpu (default = python script's default 'scipy')
+SUFFIX=""               # per-CSV basename suffix, forwarded to each
+                        # per-job python invocation. Default empty =
+                        # canonical extended_metrics.csv filename.
 WORKERS=4
 SKIP_EXISTING=0
 QUEUE_ARG="basement"
 WALL_ARG="12:00"
 MEM_ARG="256000"
 CORES_ARG=""
+GPU_ARG=""              # bsub -gpu request string. Auto-defaults to
+                        # ``num=1:gmem=20000`` when --backend gpu and
+                        # no explicit --gpu given. Empty for CPU
+                        # backends (the default).
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -108,12 +151,17 @@ while [[ $# -gt 0 ]]; do
         --celery_timestamps)
             CELERY_TIMESTAMPS="${2:?--celery_timestamps requires a value}"; shift 2 ;;
         --vectorize)     VECTORIZE=1; shift ;;
+        --backend)
+            BACKEND="${2:?--backend requires a value (scipy|vectorized|numba|gpu)}"; shift 2 ;;
+        --suffix)
+            SUFFIX="${2:?--suffix requires a value (e.g. gpu, numba)}"; shift 2 ;;
         --workers)       WORKERS="${2:?--workers requires a value}"; shift 2 ;;
         --skip_existing) SKIP_EXISTING=1; shift ;;
         --queue|-q)      QUEUE_ARG="${2:?--queue requires a value}"; shift 2 ;;
         --wall)          WALL_ARG="${2:?--wall requires a value}"; shift 2 ;;
         --mem)           MEM_ARG="${2:?--mem requires a value}"; shift 2 ;;
         --cores)         CORES_ARG="${2:?--cores requires a value}"; shift 2 ;;
+        --gpu)           GPU_ARG="${2:?--gpu requires a bsub -gpu request string}"; shift 2 ;;
         --dry_run)       DRY_RUN=1; shift ;;
         --help|-h)
             awk 'NR>1 && /^[^#]/{exit} {print}' "$0"
@@ -126,6 +174,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 CORES_FINAL="${CORES_ARG:-$WORKERS}"
+
+# Auto-request a GPU when backend=gpu and the user didn't override.
+# Conservative gmem=20000 (20 GB) covers the chunked GPU path's peak
+# transient (~5 GB at chunk=2048, N=150k) with plenty of safety, so
+# any reasonably modern GPU (24 GB+) will satisfy the constraint.
+# Bump via --gpu "num=1:gmem=80000" if you need to pin to A100/H100.
+if [[ "$BACKEND" == "gpu" && -z "$GPU_ARG" ]]; then
+    GPU_ARG="num=1:gmem=20000"
+fi
 
 # Resolve paths. We assume the repro repo is the grandparent of this
 # script's dir (analysis/benchmarking/lsf/ → repro root). Override
@@ -184,6 +241,8 @@ echo "methods         : ${METHODS:-(all)}"
 [[ -n "$SCGG_TIMESTAMPS"   ]] && echo "scgg_timestamps : $SCGG_TIMESTAMPS"
 [[ -n "$CELERY_TIMESTAMPS" ]] && echo "celery_timestamps: $CELERY_TIMESTAMPS"
 echo "vectorize       : $VECTORIZE"
+echo "backend         : ${BACKEND:-(script default)}"
+echo "suffix          : ${SUFFIX:-(none)}"
 echo "workers per job : $WORKERS"
 echo "skip_existing   : $SKIP_EXISTING"
 echo "queue           : $QUEUE_ARG"
@@ -191,6 +250,7 @@ echo "group           : $LSF_GROUP_FINAL"
 echo "wall            : $WALL_ARG"
 echo "mem (MB)        : $MEM_ARG"
 echo "cores per job   : $CORES_FINAL"
+echo "gpu request     : ${GPU_ARG:-(none)}"
 echo "log dir         : $LOG_DIR"
 echo "dry run         : $DRY_RUN"
 echo "================================================================"
@@ -276,8 +336,15 @@ while IFS=$'\t' read -r METHOD TS; do
         printf 'exec python %q --dataset %q --methods %q %s %q --workers %q' \
             "$COMPUTE_SCRIPT" "$DATASET" "$METHOD_LOWER" \
             "$TS_FLAG_NAME" "$TS" "$WORKERS"
-        if [[ "$VECTORIZE" == "1" ]]; then
+        if [[ -n "$BACKEND" ]]; then
+            printf ' --backend %q' "$BACKEND"
+        elif [[ "$VECTORIZE" == "1" ]]; then
+            # Legacy alias path: only forward --vectorize if --backend
+            # wasn't given. (--backend takes precedence.)
             printf ' --vectorize'
+        fi
+        if [[ -n "$SUFFIX" ]]; then
+            printf ' --suffix %q' "$SUFFIX"
         fi
         if [[ "$SKIP_EXISTING" == "1" ]]; then
             printf ' --skip_existing'
@@ -299,6 +366,12 @@ while IFS=$'\t' read -r METHOD TS; do
         -o "$LOG_OUT"
         -e "$LOG_ERR"
     )
+    # Tack on the -gpu request when present. Conditional so CPU jobs
+    # don't accidentally land on a GPU queue's esub validator that
+    # rejects ``no -gpu request given``.
+    if [[ -n "$GPU_ARG" ]]; then
+        BSUB_CMD+=( -gpu "$GPU_ARG" )
+    fi
 
     if [[ "$DRY_RUN" == "1" ]]; then
         printf '  [dry] %s\n' "$JOB_NAME"

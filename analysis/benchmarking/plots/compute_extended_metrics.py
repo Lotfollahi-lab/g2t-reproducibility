@@ -279,35 +279,41 @@ def _score_timestamp(
     inference_root: Path,
     method_label: str,
     *,
-    vectorized: bool = True,
+    vectorized: bool = False,
+    backend: str = "scipy",
     workers: int = 1,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Score every slice under one <TS> dir; return per-slice df + aggregate.
 
-    Speedup knobs (both opt-in to non-default behaviour where they
-    matter):
-      vectorized: forwarded to evaluate_slice as ``spearman_vectorized``.
-                  Default True (the vectorised path is 10-50× faster on
-                  CNS-sized slices and produces identical per-cell rho).
-                  Set False to fall back to the original
-                  scipy.stats.spearmanr per-cell loop.
+    Speedup knobs (all opt-in; defaults preserve byte-faithful
+    scipy.stats.spearmanr semantics):
+      vectorized: BACKWARD-COMPAT shortcut for backend='vectorized'.
+                  Prefer ``backend`` directly.
+      backend:    one of {'scipy', 'vectorized', 'numba', 'gpu'} —
+                  forwarded to ``evaluate_slice`` as
+                  ``spearman_backend``. See luna_metrics.py for the
+                  per-backend speed/precision trade-offs.
       workers:    if > 1, parallelise the per-slice loop over
                   ``min(workers, n_slices)`` worker processes via
-                  ProcessPoolExecutor. Default 1 keeps the original
-                  serial execution semantics.
+                  ProcessPoolExecutor. Default 1 = serial.
     """
     ts_root = inference_root / ts
     slice_dirs = _find_slice_dirs(ts_root)
+    # Legacy ``vectorized=True`` collapses to backend='vectorized' so
+    # the per-job tag below shows the effective dispatch.
+    effective_backend = "vectorized" if vectorized and backend == "scipy" else backend
     print(f"[compute_extended] {method_label} {ts}: "
           f"{len(slice_dirs)} slice(s)"
-          f"{'  [vectorized]' if vectorized else '  [loop]'}"
+          f"  [backend={effective_backend}]"
           f"{'' if workers == 1 else f'  [workers={workers}]'}",
           flush=True)
 
     # Each work unit is one slice. _score_one_slice is pure (reads its
     # CSVs from disk, returns a dict) so it parallelises cleanly via
     # ProcessPoolExecutor when workers > 1.
-    work_items = [(sd, ts, method_label, vectorized) for sd in slice_dirs]
+    work_items = [
+        (sd, ts, method_label, effective_backend) for sd in slice_dirs
+    ]
 
     per_slice_rows: list[Dict[str, float]] = []
     if workers <= 1:
@@ -361,7 +367,7 @@ def _score_one_slice(
     slice_dir: Path,
     ts: str,
     method_label: str,
-    vectorized: bool,
+    backend: str,
 ) -> Dict[str, float]:
     """Score one slice. Pure function — picklable for multiprocessing.
 
@@ -377,7 +383,7 @@ def _score_one_slice(
         contact_percentile=0.01,
         compute_rssd=True,
         rssd_projection="pca",   # ignored here because coords_pred is already 2-D
-        spearman_vectorized=vectorized,
+        spearman_backend=backend,
     )
     row["slice_name"] = slice_name
     row["timestamp"] = ts
@@ -398,16 +404,58 @@ def _print_slice_row(row: Dict[str, float]) -> None:
     )
 
 
+def _build_metrics_filenames(suffix: str) -> Tuple[str, str]:
+    """Translate a suffix string into the (per_slice, aggregate) CSV
+    basenames. Default suffix='' preserves the historical filenames
+    so re-scoring existing timestamps stays in-place and the plot
+    script's default lookup keeps working.
+
+    A non-empty suffix becomes ``_<suffix>``:
+        ''      → 'per_slice_extended_metrics.csv', 'extended_metrics.csv'
+        'gpu'   → 'per_slice_extended_metrics_gpu.csv', 'extended_metrics_gpu.csv'
+        'numba' → 'per_slice_extended_metrics_numba.csv', 'extended_metrics_numba.csv'
+
+    Used by both compute (writes) and the plot script (reads) so the
+    naming convention can't drift between them.
+    """
+    if suffix:
+        # Be defensive: strip any user-supplied leading '_' so
+        # ``--suffix _gpu`` and ``--suffix gpu`` produce the same file.
+        # Also reject characters that would break shell / path quoting.
+        clean = suffix.lstrip("_")
+        if not clean or not all(c.isalnum() or c in "-_." for c in clean):
+            raise ValueError(
+                f"suffix={suffix!r} must be alphanumeric plus _-.; got "
+                f"unusable characters"
+            )
+        tail = f"_{clean}"
+    else:
+        tail = ""
+    return (
+        f"per_slice_extended_metrics{tail}.csv",
+        f"extended_metrics{tail}.csv",
+    )
+
+
 def _write_outputs(
     ts: str,
     inference_root: Path,
     per_slice_df: pd.DataFrame,
     aggregate: Dict[str, float],
+    suffix: str = "",
 ) -> Tuple[Path, Path]:
-    """Write per_slice_extended_metrics.csv + extended_metrics.csv into <TS>/."""
+    """Write per_slice_extended_metrics[<suffix>].csv + extended_metrics[<suffix>].csv into <TS>/.
+
+    Default suffix='' keeps the historical filenames so re-running this
+    script over already-scored MMC (or any other) timestamps overwrites
+    the same files. Pass suffix='gpu' / 'numba' / etc to write to a
+    parallel filename so multiple backends can coexist in one
+    timestamp dir for A/B comparison.
+    """
     ts_root = inference_root / ts
-    per_slice_path = ts_root / "per_slice_extended_metrics.csv"
-    agg_path = ts_root / "extended_metrics.csv"
+    per_slice_name, agg_name = _build_metrics_filenames(suffix)
+    per_slice_path = ts_root / per_slice_name
+    agg_path = ts_root / agg_name
 
     # Stable column order: identifiers first, then metrics.
     id_cols = ["slice_name", "timestamp", "method"]
@@ -520,16 +568,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--vectorize",
         action="store_true",
         help=(
-            "Enable the vectorised per-cell Spearman path. OFF by "
-            "default so re-running this script over already-scored "
-            "MMC (or any other existing) timestamps does NOT change "
-            "the metric values — the default path is the original "
-            "scipy.stats.spearmanr per-cell loop. Pass --vectorize "
-            "to opt into the 10-50× faster batched-rankdata + "
-            "row-wise Pearson implementation. Output is "
-            "mathematically identical within float tolerance "
-            "(regression test in "
-            "scgg/tests/test_per_cell_spearman_vectorized.py)."
+            "DEPRECATED back-compat shortcut for ``--backend "
+            "vectorized``. Prefer ``--backend`` directly; passing "
+            "BOTH with conflicting values now errors out."
+        ),
+    )
+    p.add_argument(
+        "--backend",
+        default="scipy",
+        choices=("scipy", "vectorized", "numba", "gpu"),
+        help=(
+            "Per-cell Spearman implementation. Default 'scipy' "
+            "preserves the original per-cell scipy.stats.spearmanr "
+            "loop so re-scoring already-completed timestamps cannot "
+            "shift the metric values. Other choices: 'vectorized' "
+            "(5-20× faster, batched rankdata + einsum, CPU); "
+            "'numba' (5-15× faster, JIT'd CPU with prange threading, "
+            "needs `numba`); 'gpu' (30-100× faster, chunked "
+            "torch.cdist + argsort, needs CUDA — tied rows can drift "
+            "by ~1e-3 because argsort doesn't do scipy's "
+            "average-tie correction). Regression tests in "
+            "scgg/tests/test_per_cell_spearman_backends.py confirm "
+            "scipy ≡ vectorized ≡ numba within 1e-7 and "
+            "scipy ≈ gpu within 1e-3."
         ),
     )
     p.add_argument(
@@ -543,6 +604,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "this so the per-method/per-timestamp defaults stay in "
             "one place (this .py file) rather than being duplicated "
             "in bash."
+        ),
+    )
+    p.add_argument(
+        "--suffix",
+        default="",
+        help=(
+            "Optional filename tag applied to the written CSVs. "
+            "Default empty = ``extended_metrics.csv`` (matches the "
+            "historical filename so re-scoring existing timestamps "
+            "stays in-place). Non-empty becomes ``_<suffix>`` — e.g. "
+            "``--suffix gpu`` writes ``extended_metrics_gpu.csv`` "
+            "and ``per_slice_extended_metrics_gpu.csv`` next to the "
+            "originals. Useful for A/B-comparing backends without "
+            "overwriting the canonical scipy scores. The plot script "
+            "has a matching ``--suffix`` flag — pass the same value "
+            "there to render from the per-backend CSVs."
         ),
     )
     return p.parse_args(argv)
@@ -665,14 +742,38 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve speedup knobs once and log them so it's obvious in the
     # LSF stdout which path is running. Defaults preserve the original
-    # behaviour: serial workers, loop-based Spearman. Both speedups
-    # are explicit opt-ins so re-running this script over already-
-    # scored timestamps cannot silently shift their metric values.
-    vectorized = bool(args.vectorize)
+    # behaviour: serial workers, scipy.stats.spearmanr per-cell loop.
+    # All speedups are explicit opt-ins so re-running this script over
+    # already-scored timestamps cannot silently shift their metric
+    # values.
+    backend = str(args.backend)
+    # Legacy --vectorize is an alias for --backend vectorized. If both
+    # are given and conflict, fail loudly (mirror luna_metrics's check).
+    if args.vectorize:
+        if backend == "scipy":
+            backend = "vectorized"
+        elif backend != "vectorized":
+            print(
+                f"[compute_extended] ERROR: conflicting flags: --vectorize "
+                f"+ --backend {backend!r}. Use --backend exclusively.",
+                file=sys.stderr,
+            )
+            return 2
     workers = max(1, int(args.workers))
+    # Resolve suffix once and pre-compute the aggregate basename used
+    # by the --skip_existing check below. Empty suffix preserves
+    # historical filenames.
+    suffix = args.suffix or ""
+    try:
+        _per_slice_basename, agg_basename = _build_metrics_filenames(suffix)
+    except ValueError as e:
+        print(f"[compute_extended] ERROR: {e}", file=sys.stderr)
+        return 2
+    if suffix:
+        print(f"[compute_extended] writing to suffixed CSVs: {agg_basename}")
     print(
         f"[compute_extended] speedup knobs: "
-        f"vectorized={vectorized} workers={workers}"
+        f"backend={backend} workers={workers}"
     )
     # When workers > 1 the per-process BLAS threading would multiply
     # against the worker count and oversubscribe the box. Pin each
@@ -695,18 +796,18 @@ def main(argv: list[str] | None = None) -> int:
     for method_label, root, ts_list in work:
         for ts in ts_list:
             ts_root = root / ts
-            agg_path = ts_root / "extended_metrics.csv"
+            agg_path = ts_root / agg_basename
             if args.skip_existing and agg_path.exists():
                 print(f"[compute_extended] {method_label} {ts}: skip "
-                      f"(extended_metrics.csv exists)")
+                      f"({agg_basename} exists)")
                 n_skipped += 1
                 continue
             try:
                 per_slice_df, aggregate = _score_timestamp(
                     ts, root, method_label,
-                    vectorized=vectorized, workers=workers,
+                    backend=backend, workers=workers,
                 )
-                _write_outputs(ts, root, per_slice_df, aggregate)
+                _write_outputs(ts, root, per_slice_df, aggregate, suffix=suffix)
                 n_done += 1
             except Exception as exc:
                 # Don't let a single bad run abort the whole sweep —
