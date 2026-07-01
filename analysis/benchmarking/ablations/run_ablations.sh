@@ -56,6 +56,13 @@ DRY_RUN="${DRY_RUN:-0}"
 ONLY="${ONLY:-}"          # comma-separated ablation names to restrict to
                           # (e.g. ONLY=diffusion or ONLY=diffusion,K2).
                           # Empty = the whole selected set.
+SUBMIT_DELAY="${SUBMIT_DELAY:-2}"   # seconds to wait between submissions.
+                          # submit_pipeline.sh keys every run's artifact dir on
+                          # `date +%Y%m%d_%H%M%S` (1-SECOND resolution), so two
+                          # back-to-back submits landing in the same second get
+                          # the SAME timestamp -> same output dir -> they clobber
+                          # each other (duplicate rows + missing seeds). A >=1s
+                          # gap guarantees distinct seconds; 2s adds margin.
 
 entries=( "${CORE[@]}" )
 if [[ "$ABLATION_SET" == "all" ]]; then
@@ -85,6 +92,8 @@ if [[ ! -f "$MANIFEST" ]]; then
   echo "ablation,seed,run_name,timestamp" > "$MANIFEST"
 fi
 
+seen_ts=""   # timestamps recorded so far THIS invocation (collision guard)
+
 for entry in "${entries[@]}"; do
   name="${entry%%|*}"      # text before the first '|'
   extra="${entry#*|}"      # text after  the first '|'
@@ -111,8 +120,23 @@ for entry in "${entries[@]}"; do
     echo "$out" | sed -n '1,40p'
     ts="$(echo "$out" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)"
     if [[ -z "$ts" ]]; then ts="UNKNOWN_PARSE_FAILED"; fi
+    # Collision guard: submit_pipeline.sh keys every artifact dir on this
+    # 1-second timestamp, so two runs sharing one clobber each other. The
+    # SUBMIT_DELAY below is meant to prevent this; warn loudly if one slips
+    # through anyway (e.g. SUBMIT_DELAY=0).
+    if [[ "$ts" != "UNKNOWN_PARSE_FAILED" ]]; then
+      case " $seen_ts " in
+        *" $ts "*)
+          echo "  !! WARNING: timestamp $ts already used this run -> COLLISION;" >&2
+          echo "     this run will overwrite the earlier one. Increase SUBMIT_DELAY and re-run." >&2 ;;
+        *) seen_ts="$seen_ts $ts" ;;
+      esac
+    fi
     echo "$name,$s,$run_name,$ts" >> "$MANIFEST"
     echo "  -> recorded timestamp: $ts"
+    # Space submissions apart so consecutive runs land in DIFFERENT seconds
+    # (distinct timestamps -> distinct artifact dirs). Skipped for dry runs.
+    [[ "$DRY_RUN" == "1" ]] || sleep "$SUBMIT_DELAY"
   done
 done
 
