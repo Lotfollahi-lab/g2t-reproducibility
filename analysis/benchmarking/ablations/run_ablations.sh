@@ -16,6 +16,7 @@
 # USAGE (edit the paths in the CONFIG block first, then):
 #   bash run_ablations.sh                     # submit the CORE ablations
 #   ABLATION_SET=all bash run_ablations.sh    # submit CORE + EXTENDED
+#   ONLY=diffusion bash run_ablations.sh      # submit only the named ablation(s)
 #   DRY_RUN=1 bash run_ablations.sh           # print submit commands, don't submit
 # -----------------------------------------------------------------------------
 set -euo pipefail
@@ -52,10 +53,31 @@ EXTENDED=(
 
 ABLATION_SET="${ABLATION_SET:-core}"
 DRY_RUN="${DRY_RUN:-0}"
+ONLY="${ONLY:-}"          # comma-separated ablation names to restrict to
+                          # (e.g. ONLY=diffusion or ONLY=diffusion,K2).
+                          # Empty = the whole selected set.
 
 entries=( "${CORE[@]}" )
 if [[ "$ABLATION_SET" == "all" ]]; then
   entries+=( "${EXTENDED[@]}" )
+fi
+
+# Optional ONLY filter: keep just the named ablation(s). Handy to re-run a
+# single ablation (e.g. after fixing the diffusion path) without
+# resubmitting the ones that already succeeded. Portable (bash 3.2+).
+if [[ -n "$ONLY" ]]; then
+  filtered=()
+  for entry in "${entries[@]}"; do
+    nm="${entry%%|*}"
+    case ",$ONLY," in
+      *",$nm,"*) filtered+=( "$entry" ) ;;
+    esac
+  done
+  if [[ ${#filtered[@]} -eq 0 ]]; then
+    echo "ERROR: ONLY='$ONLY' matched no ablations in set '$ABLATION_SET'." >&2
+    exit 1
+  fi
+  entries=( "${filtered[@]}" )
 fi
 
 # Manifest header (created once).
