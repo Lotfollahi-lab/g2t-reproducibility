@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # submit_cellcharter_eval.sh
 # -----------------------------------------------------------------------------
-# CellCharter niche-recovery evaluation on the CNS test set for four coordinate
-# sources (imputed reference / LUNA / G2T / CeLEry), scored against the
-# ground-truth `Sub_molecular_tissue_region` labels (NMI + ARI).
+# CellCharter niche-recovery evaluation on the CNS test set, across 5 SEEDS,
+# for four coordinate sources (imputed reference / LUNA / G2T / CeLEry), scored
+# against the ground-truth `Sub_molecular_tissue_region` labels (NMI + ARI).
 #
-# One LSF job. The shared representation is a PCA of the 600-dim Harmony latent
-# already stored in the silver AnnData (no scVI), so this is light — a GPU only
-# accelerates CellCharter's GMM.
+# ONE LSF JOB PER SEED (parallel, faster). Each job compares reference/luna/g2t/
+# celery for that seed's reconstructions and its own CellCharter GMM seed, and
+# writes niche_eval_out/seed<S>/. Aggregate to mean±SD afterwards with
+#   python aggregate_niche_seeds.py --root niche_eval_out
+#
+# Seeds are paired by the MODEL seed embedded in each run's inner folder name
+# (`..._seed<S>_inference`), so luna/g2t/celery line up per seed even if their
+# timestamps don't sort the same way (falls back to array index if not found).
 #
 # Edit the CONFIG block, then:  bash submit_cellcharter_eval.sh
+#                          or:  DRY_RUN=1 bash submit_cellcharter_eval.sh
 # -----------------------------------------------------------------------------
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,31 +23,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ============================ CONFIG (verify paths) ==========================
 ENV_ACTIVATE="source /nfs/team361/sb75/.venvs/cellcharter/bin/activate"
 
-# Shared expression (silver cns_luna: X=600-d latent, obsm['spatial']=reference
-# coords, obs['cell_id'], obs['cell_section']). Dir of per-section .h5ad or one file.
+# Shared expression (silver cns_luna dir of per-section *_test.h5ad).
 EXPR_H5AD="/nfs/team361/sb75/DATASETS/silver/cns_luna"
 
-# Reconstructed coords = each run's inference dir (globs metadata_pred.csv per
-# section). Timestamps are paired with the model checkpoints you gave.
-# NOTE: if these *_inference/<TS> dirs don't contain metadata_pred.csv, re-run
-# the pipeline in test_only mode against each best_model.ckpt to regenerate them.
 ART="/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna"
-COORDS_LUNA="$ART/luna_inference/20260601_085512"
-COORDS_G2T="$ART/scgg_inference/20260602_142452"
-COORDS_CELERY="$ART/celery_inference/20260604_141952"
-# Reference coords default to the AnnData's obsm['spatial']; leave empty to use it.
-COORDS_REF=""
+LUNA_PARENT="$ART/luna_inference"
+G2T_PARENT="$ART/scgg_inference"
+CELERY_PARENT="$ART/celery_inference"
+
+# The 5 seed timestamps per method (from the inference dirs). Order does NOT
+# matter — jobs are paired by the seed discovered inside each run — but list all
+# five for each method. Each entry is a timestamp under the *_PARENT above.
+LUNA_TS=(20260601_085512 20260601_085523 20260601_085535 20260601_085541 20260601_085547)
+G2T_TS=(20260530_165200 20260530_165210 20260530_165216 20260530_165223 20260530_165229)
+CELERY_TS=(20260604_101049 20260604_141924 20260604_141952 20260604_141959 20260604_142006)
 
 GT_METADATA="/nfs/team361/sb75/DATASETS/bronze/cns_luna_raw/metadata.csv"
-GT_COL="Sub_molecular_tissue_region"     # or Main_molecular_tissue_region for a coarser (faster) comparison
-GT_ID_COL="NAME"                          # SCP metadata id column
-EXPR_ID_COL="cell_id"                     # AnnData obs id -> joins to metadata NAME and metadata_pred index
+GT_COL="Sub_molecular_tissue_region"     # or Main_molecular_tissue_region (coarser)
+GT_ID_COL="NAME"
+EXPR_ID_COL="cell_id"
 
-# Method knobs (applied IDENTICALLY to all four sources).
+# Method knobs (applied IDENTICALLY to all sources and all seeds).
 N_LATENT=50        # PCA dim of the 600-d latent (shared representation)
 N_LAYERS=3         # CellCharter aggregation hops
 N_CLUSTERS=0       # 0 = number of unique GT regions
-SEED=0
 OUT="$HERE/niche_eval_out"
 
 # LSF (matches the other scripts on this cluster).
@@ -52,29 +57,60 @@ MEM_MB=256000
 CORES=8
 WALL="12:00"
 LOGDIR="$HERE/lsf_logs"
+DRY_RUN="${DRY_RUN:-0}"
 # =============================================================================
 
 mkdir -p "$LOGDIR" "$OUT"
 
-REF_ARG=""; [[ -n "$COORDS_REF" ]] && REF_ARG="--coords_ref '$COORDS_REF'"
-CEL_ARG=""; [[ -n "$COORDS_CELERY" ]] && CEL_ARG="--coords_celery '$COORDS_CELERY'"
+# Discover the model seed embedded in a run dir (…_seed<S>_inference); empty if absent.
+seed_of() {
+  find "$1" -maxdepth 6 -type d -name '*_seed*_inference' 2>/dev/null \
+    | head -1 | sed -E 's#.*_seed([0-9]+)_inference.*#\1#'
+}
 
-CMD="$ENV_ACTIVATE && python $HERE/cellcharter_niche_eval.py \
-  --expr_h5ad '$EXPR_H5AD' \
-  --coords_luna '$COORDS_LUNA' --coords_g2t '$COORDS_G2T' $CEL_ARG $REF_ARG \
-  --gt_metadata '$GT_METADATA' --gt_col '$GT_COL' --gt_id_col '$GT_ID_COL' \
-  --expr_id_col '$EXPR_ID_COL' \
-  --n_latent $N_LATENT --n_layers $N_LAYERS --n_clusters $N_CLUSTERS --seed $SEED \
-  --out '$OUT'"
+# Build seed -> run-dir maps (fall back to array index when no embedded seed).
+declare -A LMAP GMAP CMAP
+i=0; for ts in "${LUNA_TS[@]}";   do d="$LUNA_PARENT/$ts";   s=$(seed_of "$d"); LMAP[${s:-$i}]="$d"; i=$((i+1)); done
+i=0; for ts in "${G2T_TS[@]}";    do d="$G2T_PARENT/$ts";    s=$(seed_of "$d"); GMAP[${s:-$i}]="$d"; i=$((i+1)); done
+i=0; for ts in "${CELERY_TS[@]}"; do d="$CELERY_PARENT/$ts"; s=$(seed_of "$d"); CMAP[${s:-$i}]="$d"; i=$((i+1)); done
 
-echo "Submitting CellCharter niche eval:"; echo "  $CMD"
+echo "Seed -> run-dir pairing (luna | g2t | celery):"
+n_sub=0
+for s in $(printf '%s\n' "${!LMAP[@]}" | sort -n); do
+  L="${LMAP[$s]:-}"; G="${GMAP[$s]:-}"; C="${CMAP[$s]:-}"
+  if [[ -z "$G" || -z "$C" ]]; then
+    echo "  seed $s: SKIP (missing in $([[ -z $G ]] && echo g2t) $([[ -z $C ]] && echo celery))"
+    continue
+  fi
+  for d in "$L" "$G" "$C"; do [[ -d "$d" ]] || { echo "  seed $s: MISSING dir $d"; exit 1; }; done
+  echo "  seed $s: $(basename "$L") | $(basename "$G") | $(basename "$C")"
 
-bsub -J cc_niche_eval \
-     -q "$QUEUE" -G "$GROUP" -gpu "$GPU_SPEC" \
-     -n "$CORES" \
-     -M "$MEM_MB" -R "select[mem>$MEM_MB] rusage[mem=$MEM_MB] span[hosts=1]" \
-     -W "$WALL" \
-     -o "$LOGDIR/cc_niche_eval.%J.out" -e "$LOGDIR/cc_niche_eval.%J.err" \
-     "bash -lc \"$CMD\""
+  CMD="$ENV_ACTIVATE && python $HERE/cellcharter_niche_eval.py \
+    --expr_h5ad '$EXPR_H5AD' \
+    --coords_luna '$L' --coords_g2t '$G' --coords_celery '$C' \
+    --gt_metadata '$GT_METADATA' --gt_col '$GT_COL' --gt_id_col '$GT_ID_COL' \
+    --expr_id_col '$EXPR_ID_COL' \
+    --n_latent $N_LATENT --n_layers $N_LAYERS --n_clusters $N_CLUSTERS \
+    --seed $s --out '$OUT/seed$s'"
 
-echo "Submitted. Outputs -> $OUT (niche_eval_metrics.csv, niche_labels.csv, niche_maps.png)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "    [dry-run] $CMD"
+  else
+    bsub -J "ccniche_s$s" \
+         -q "$QUEUE" -G "$GROUP" -gpu "$GPU_SPEC" -n "$CORES" \
+         -M "$MEM_MB" -R "select[mem>$MEM_MB] rusage[mem=$MEM_MB] span[hosts=1]" \
+         -W "$WALL" \
+         -o "$LOGDIR/ccniche_s$s.%J.out" -e "$LOGDIR/ccniche_s$s.%J.err" \
+         "bash -lc \"$CMD\""
+  fi
+  n_sub=$((n_sub+1))
+done
+
+echo
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "DRY-RUN: would submit $n_sub job(s). Re-run without DRY_RUN=1 to submit."
+else
+  echo "Submitted $n_sub job(s) -> $OUT/seed<S>/ (each: niche_eval_metrics.csv, niche_labels.csv, *.png/pdf)."
+  echo "When all finish, aggregate to mean±SD:"
+  echo "  $ENV_ACTIVATE && python $HERE/aggregate_niche_seeds.py --root '$OUT'"
+fi
