@@ -73,14 +73,42 @@ def _read_xy(path, x_col, y_col) -> pd.DataFrame:
 
 
 def _section_of(path: Path, known) -> "str | None":
-    """Pick the test-section whose name is an exact path component of `path`
-    (longest match wins); fall back to the immediate parent dir name."""
-    parts = set(path.parts)
-    hits = [s for s in known if s in parts]
+    """Map a metadata_pred.csv path to a test-section stem. Inference folders are
+    named ``<section>_<tile>`` (e.g. ``well01OB_0``, ``well1_5_0``), so an exact
+    path-component match is tried first, then a trailing ``_<int>`` tile suffix is
+    peeled off progressively until a known section matches (returning on the
+    first/longest hit, so ``well1_5_0`` -> ``well1_5``, not ``well1``)."""
+    import re
+    parts = list(path.parts)
+    hits = [s for s in known if s in set(parts)]
     if hits:
         return max(hits, key=len)
-    pn = path.parent.name
-    return pn if pn in known else None
+    for comp in reversed(parts):                       # deepest folder first
+        c = comp
+        while True:
+            if c in known:
+                return c
+            m = re.match(r"^(.*)_\d+$", c)
+            if not m:
+                break
+            c = m.group(1)
+    return None
+
+
+def _map_ints(entry, ints):
+    """Map a section's metadata_pred integer index -> cell_ids. The index is the
+    section-local position 0..n-1 (verified: well1_5 pred index 0..19869 == its
+    19870 cells), so positional ``ids[i]`` is primary; ``_bronze_row_pos`` is only
+    a fallback for runs that happened to write the global bronze position."""
+    ids = entry["ids"]; n = len(ids); bronze = entry["bronze"]
+    ints = np.asarray(ints, dtype=int)
+    if ints.size and ints.min() >= 0 and ints.max() < n:
+        return [ids[int(i)] for i in ints], "positional"
+    if bronze is not None:
+        mapped = [bronze.get(int(i)) for i in ints]
+        if sum(v is not None for v in mapped) >= 0.5 * max(len(mapped), 1):
+            return mapped, "_bronze_row_pos"
+    return [ids[int(i)] if 0 <= int(i) < n else None for i in ints], "positional(clipped)"
 
 
 def load_test_expr(path: str, id_col: str, section_col: str):
@@ -117,22 +145,19 @@ def load_test_expr(path: str, id_col: str, section_col: str):
         if "spatial" not in a.obsm:
             raise KeyError(f"obsm['spatial'] (reference coords) missing in {f}")
         n = a.n_obs
-        src = "positional"
+        a.obs["_section"] = sec
+        a.obs["_key"] = a.obs[id_col].astype(str).values
+        ids = a.obs["_key"].to_numpy()               # positional order (0..n-1)
+        bronze = None
         if "_bronze_row_pos" in a.obs:
             rp = pd.to_numeric(a.obs["_bronze_row_pos"], errors="coerce").to_numpy()
             if not np.isnan(rp).any():
-                rowpos = rp.astype(int); src = "_bronze_row_pos"
-            else:
-                rowpos = np.arange(n)
-        else:
-            rowpos = np.arange(n)
-        a.obs["_section"] = sec
-        a.obs["_rowpos"] = rowpos
-        a.obs["_key"] = a.obs[id_col].astype(str).values
-        sec2map[sec] = dict(zip(rowpos.tolist(), a.obs["_key"].tolist()))
+                bronze = dict(zip(rp.astype(int).tolist(), ids.tolist()))
+        sec2map[sec] = {"ids": ids, "bronze": bronze}
         parts.append(a)
-        print(f"[niche]   {Path(f).name}: section={sec!r}, {n} cells, "
-              f"rowpos∈[{int(rowpos.min())},{int(rowpos.max())}] ({src})", flush=True)
+        print(f"[niche]   {Path(f).name}: section={sec!r}, {n} cells "
+              f"(pred index expected 0..{n-1}; _bronze_row_pos "
+              f"{'available' if bronze is not None else 'absent'})", flush=True)
 
     adata = parts[0] if len(parts) == 1 else ad.concat(parts, join="outer", merge="same")
     if section_col not in adata.obs:
@@ -160,7 +185,7 @@ def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
     if not files:
         raise FileNotFoundError(f"No metadata_pred.csv under {p} (run inference first?)")
     known = set(sec2map)
-    frames, n_unmapped, secs_seen, verify = [], 0, [], []
+    frames, n_unmapped, secs_seen, verify, hows = [], 0, [], [], set()
     for f in files:
         fp = Path(f)
         xy = _read_xy(f, x_col, y_col)
@@ -171,37 +196,41 @@ def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
                 print(f"[niche] WARNING: no test section matches {f} "
                       f"(parent={fp.parent.name!r}); skipping", file=sys.stderr)
                 continue
-            m = sec2map[sec]
+            entry = sec2map[sec]
             ints = idx_num.astype(int).to_numpy()
-            ids = [m.get(int(i)) for i in ints]
-            ok = np.array([v is not None for v in ids])
+            ids_list, how = _map_ints(entry, ints)
+            hows.add(how)
+            ok = np.array([v is not None for v in ids_list])
             n_unmapped += int((~ok).sum())
             sub = xy.iloc[ok].copy()
-            sub.index = pd.Index([v for v in ids if v is not None], name="cell_id")
+            sub.index = pd.Index([v for v, k in zip(ids_list, ok) if k], name="cell_id")
             secs_seen.append(sec)
             if spatial_by_id is not None:            # sanity-check vs metadata_true
                 tf = fp.with_name("metadata_true.csv")
                 if tf.exists():
                     try:
                         t = _read_xy(tf, x_col, y_col)
-                        ti = pd.to_numeric(t.index, errors="coerce").astype("Int64")
-                        rows = [(m.get(int(i)), tx, ty) for i, tx, ty in
-                                zip(ti, t["x"].to_numpy(float), t["y"].to_numpy(float))
-                                if pd.notna(i) and m.get(int(i)) in spatial_by_id]
-                        if len(rows) >= 10:
-                            cid, tx, ty = zip(*rows)
-                            S = np.array([spatial_by_id[c] for c in cid], float)
-                            T = np.column_stack([tx, ty])
-                            cxx = abs(np.corrcoef(T[:, 0], S[:, 0])[0, 1])
-                            cyy = abs(np.corrcoef(T[:, 1], S[:, 1])[0, 1])
-                            cxy = abs(np.corrcoef(T[:, 0], S[:, 1])[0, 1])
-                            cyx = abs(np.corrcoef(T[:, 1], S[:, 0])[0, 1])
+                        tnum = pd.to_numeric(t.index, errors="coerce")
+                        tk = tnum.notna().to_numpy()
+                        tids, _ = _map_ints(entry, tnum[tk].astype(int).to_numpy())
+                        T = t.iloc[tk][["x", "y"]].to_numpy(float)
+                        keep = [(cid, T[j]) for j, cid in enumerate(tids)
+                                if cid in spatial_by_id]
+                        if len(keep) >= 10:
+                            cids = [c for c, _ in keep]
+                            Tk = np.array([v for _, v in keep], float)
+                            S = np.array([spatial_by_id[c] for c in cids], float)
+                            cxx = abs(np.corrcoef(Tk[:, 0], S[:, 0])[0, 1])
+                            cyy = abs(np.corrcoef(Tk[:, 1], S[:, 1])[0, 1])
+                            cxy = abs(np.corrcoef(Tk[:, 0], S[:, 1])[0, 1])
+                            cyx = abs(np.corrcoef(Tk[:, 1], S[:, 0])[0, 1])
                             verify.append(max(min(cxx, cyy), min(cxy, cyx)))
                     except Exception:
                         pass
         else:                                        # already biological ids
             sub = xy.copy()
             sub.index = sub.index.astype(str)
+            hows.add("cell_id")
         frames.append(sub)
     if not frames:
         raise RuntimeError(f"No metadata_pred.csv could be matched to a test "
@@ -212,7 +241,8 @@ def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
     df = df[~df.index.duplicated(keep="first")]
     dup = n_raw - len(df)
     msg = (f"[niche]   {label or path}: {len(files)} file(s), "
-           f"{len(set(secs_seen)) or 'n/a'} sections, {len(df)} cells mapped")
+           f"{len(set(secs_seen)) or 'n/a'} sections, {len(df)} cells mapped"
+           f" [{'/'.join(sorted(hows)) or 'id'}]")
     if n_unmapped:
         msg += f"  (! {n_unmapped} rows had no cell_id in the test AnnData — dropped)"
     if dup:
