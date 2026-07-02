@@ -42,19 +42,36 @@ helps; `edm_off` is the strongest single result a reviewer will look for.
    This submits one LSF job per (ablation, seed) and records each run's
    timestamp into `ablation_manifest.csv`.
 
-2. **Score each run** once the jobs finish (computes Spearman / Contact F1 /
-   Sum RSSD per run):
+2. **Analyze everything in one shot** (recommended) — once the jobs finish, this
+   scores every run, builds the comparison table, and renders the ablation
+   bar chart:
+   ```bash
+   python run_ablation_analysis.py                 # score + aggregate + bar chart
+   python run_ablation_analysis.py --skip_score    # if the runs are already scored
+   python run_ablation_analysis.py --workers 4     # parallelise the scoring step
+   # optionally also render a qualitative true-vs-generated SVG panel:
+   python run_ablation_analysis.py --svg_section mouse2_slice229 --svg_top_k 4
+   ```
+   Writes `ablation_comparison.csv`, `ablation_per_seed.csv`, and
+   `ablation_comparison.{png,pdf}` — a grouped bar chart with one panel per metric,
+   baseline highlighted, Δ-vs-baseline annotated (Sum RSSD panel auto-switches to a
+   log scale if an ablation degenerates). This wraps the two manual steps below.
+
+The individual steps (equivalent to the one-shot above, if you want them separately):
+
+2a. **Score each run** (computes Spearman / Contact F1 / Sum RSSD per run):
    ```bash
    python /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/plots/compute_extended_metrics.py \
        --dataset mmc_luna --methods g2t \
        --scgg_timestamps $(tail -n +2 ablation_manifest.csv | cut -d, -f4 | paste -sd, -)
    ```
 
-3. **Aggregate into one comparison table** (mean ± SEM across seeds, with Δ vs baseline):
+2b. **Aggregate into one comparison table** (mean ± SEM across seeds, with Δ vs baseline):
    ```bash
    python aggregate_ablations.py
    ```
    Writes `ablation_comparison.csv` (per-ablation) and `ablation_per_seed.csv`.
+   (The bar chart is only produced by `run_ablation_analysis.py`, not this step.)
 
 ## SVG visualizations (ground-truth vs generated coordinates)
 
