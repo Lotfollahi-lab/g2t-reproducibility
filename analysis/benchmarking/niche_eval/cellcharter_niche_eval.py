@@ -111,14 +111,43 @@ def _map_ints(entry, ints):
     return [ids[int(i)] if 0 <= int(i) < n else None for i in ints], "positional(clipped)"
 
 
+def _resolve_str_ids(index, name2id):
+    """Reconcile a string-indexed pred file to biological cell_ids. CeLEry writes
+    the AnnData obs_names (``{cell_id}_{section}``, e.g. ``well01OB_0_well01OB``),
+    so we map obs_name -> cell_id; ids that are already cell_ids pass through."""
+    strs = [str(v) for v in index]
+    if name2id is None:
+        return strs, "cell_id"
+    valid = set(name2id.values())
+    return ([v if v in valid else name2id.get(v) for v in strs], "obs_name->cell_id")
+
+
+def _axis_corr(cids, T, spatial_by_id):
+    """Scale-free per-axis |corr| between mapped true coords T and the AnnData
+    reference coords, under the best axis pairing (min-max norm can swap axes but
+    not rotate). ~1.0 confirms the row->cell_id mapping is not scrambled."""
+    keep = [(c, T[j]) for j, c in enumerate(cids) if c is not None and c in spatial_by_id]
+    if len(keep) < 10:
+        return None
+    Tk = np.array([v for _, v in keep], float)
+    S = np.array([spatial_by_id[c] for c, _ in keep], float)
+    cxx = abs(np.corrcoef(Tk[:, 0], S[:, 0])[0, 1])
+    cyy = abs(np.corrcoef(Tk[:, 1], S[:, 1])[0, 1])
+    cxy = abs(np.corrcoef(Tk[:, 0], S[:, 1])[0, 1])
+    cyx = abs(np.corrcoef(Tk[:, 1], S[:, 0])[0, 1])
+    return max(min(cxx, cyy), min(cxy, cyx))
+
+
 def load_test_expr(path: str, id_col: str, section_col: str):
     """Load ONLY ``*_test.h5ad`` (train objects may use a different id scheme and
     are not needed). Records, per cell, its section (from the file name) and the
     per-section integer row position that ``metadata_pred.csv`` is indexed by
     (``obs['_bronze_row_pos']`` if present, else positional 0..n-1).
 
-    Returns ``(adata, sec2map)`` where ``sec2map[section][rowpos] = cell_id`` is
-    the bridge from a (folder, integer) pair back to a biological cell id."""
+    Returns ``(adata, sec2map, name2id)``: ``sec2map[section]`` bridges a (folder,
+    integer) pair back to a cell id (positional / _bronze_row_pos), and
+    ``name2id`` maps obs_names -> cell_id for sources (e.g. CeLEry) that index by
+    the ``{cell_id}_{section}`` obs_name instead of the section-local integer."""
     import anndata as ad
     p = Path(path)
     if p.is_dir():
@@ -162,13 +191,16 @@ def load_test_expr(path: str, id_col: str, section_col: str):
     adata = parts[0] if len(parts) == 1 else ad.concat(parts, join="outer", merge="same")
     if section_col not in adata.obs:
         adata.obs[section_col] = adata.obs["_section"].values
+    # obs_name -> cell_id (built BEFORE main overwrites obs_names with cell_id)
+    name2id = dict(zip(adata.obs_names.astype(str), adata.obs["_key"].astype(str)))
     print(f"[niche] loaded {adata.n_obs} test cells across {len(sec2map)} sections",
           flush=True)
-    return adata, sec2map
+    return adata, sec2map, name2id
 
 
 def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
-                                label: str = "", spatial_by_id=None) -> pd.DataFrame:
+                                label: str = "", spatial_by_id=None,
+                                name2id=None) -> pd.DataFrame:
     """Directory holding one ``metadata_pred.csv`` per section (at any depth).
     The section is read from the folder name and the file's integer index is
     mapped back to a biological ``cell_id`` via ``sec2map``. (If a file is already
@@ -213,24 +245,33 @@ def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
                         tnum = pd.to_numeric(t.index, errors="coerce")
                         tk = tnum.notna().to_numpy()
                         tids, _ = _map_ints(entry, tnum[tk].astype(int).to_numpy())
-                        T = t.iloc[tk][["x", "y"]].to_numpy(float)
-                        keep = [(cid, T[j]) for j, cid in enumerate(tids)
-                                if cid in spatial_by_id]
-                        if len(keep) >= 10:
-                            cids = [c for c, _ in keep]
-                            Tk = np.array([v for _, v in keep], float)
-                            S = np.array([spatial_by_id[c] for c in cids], float)
-                            cxx = abs(np.corrcoef(Tk[:, 0], S[:, 0])[0, 1])
-                            cyy = abs(np.corrcoef(Tk[:, 1], S[:, 1])[0, 1])
-                            cxy = abs(np.corrcoef(Tk[:, 0], S[:, 1])[0, 1])
-                            cyx = abs(np.corrcoef(Tk[:, 1], S[:, 0])[0, 1])
-                            verify.append(max(min(cxx, cyy), min(cxy, cyx)))
+                        v = _axis_corr(tids, t.iloc[tk][["x", "y"]].to_numpy(float),
+                                       spatial_by_id)
+                        if v is not None:
+                            verify.append(v)
                     except Exception:
                         pass
-        else:                                        # already biological ids
-            sub = xy.copy()
-            sub.index = sub.index.astype(str)
-            hows.add("cell_id")
+        else:                                        # string-indexed (e.g. CeLEry obs_names)
+            ids_list, how = _resolve_str_ids(xy.index, name2id)
+            hows.add(how)
+            ok = np.array([v is not None for v in ids_list])
+            n_unmapped += int((~ok).sum())
+            sub = xy.iloc[ok].copy()
+            sub.index = pd.Index([v for v, k in zip(ids_list, ok) if k], name="cell_id")
+            sec = _section_of(fp, known)
+            if sec is not None:
+                secs_seen.append(sec)
+            if spatial_by_id is not None:            # sanity-check vs metadata_true
+                tf = fp.with_name("metadata_true.csv")
+                if tf.exists():
+                    try:
+                        t = _read_xy(tf, x_col, y_col)
+                        tids, _ = _resolve_str_ids(t.index, name2id)
+                        v = _axis_corr(tids, t[["x", "y"]].to_numpy(float), spatial_by_id)
+                        if v is not None:
+                            verify.append(v)
+                    except Exception:
+                        pass
         frames.append(sub)
     if not frames:
         raise RuntimeError(f"No metadata_pred.csv could be matched to a test "
@@ -359,7 +400,8 @@ def main() -> int:
 
     # ---- 1. TEST expression AnnData (representation + reference coords) ----
     print(f"[niche] loading TEST expression: {args.expr_h5ad}", flush=True)
-    adata, sec2map = load_test_expr(args.expr_h5ad, args.expr_id_col, args.expr_section_col)
+    adata, sec2map, name2id = load_test_expr(args.expr_h5ad, args.expr_id_col,
+                                             args.expr_section_col)
     _sp = np.asarray(adata.obsm["spatial"], dtype=float)
     spatial_by_id = {k: _sp[i] for i, k in enumerate(adata.obs["_key"].astype(str).values)}
 
@@ -385,16 +427,28 @@ def main() -> int:
         coord_sources["celery"] = args.coords_celery
     preds = {name: load_pred_coords_by_section(path, sec2map, args.coord_x_col,
                                                args.coord_y_col, label=name,
-                                               spatial_by_id=spatial_by_id)
+                                               spatial_by_id=spatial_by_id,
+                                               name2id=name2id)
              for name, path in coord_sources.items()}
     if args.coords_ref:  # optional external reference; else use obsm['spatial']
         preds["reference"] = load_pred_coords_by_section(
             args.coords_ref, sec2map, args.coord_x_col, args.coord_y_col,
-            label="reference", spatial_by_id=spatial_by_id)
+            label="reference", spatial_by_id=spatial_by_id, name2id=name2id)
 
     # ---- 4. common cells across expr + GT + every predicted source --------
+    # Any section absent from ANY source is dropped for ALL (the comparison is
+    # only meaningful where every method produced coordinates). For this CNS run
+    # g2t covers 14 of the 18 test sections (the sagittal*/spinalcord sections
+    # were not generated), so those cells fall out here automatically.
     aid = set(adata.obs["_key"].astype(str))
     gid = set(gt_region.index.astype(str))
+    id2sec = dict(zip(adata.obs["_key"].astype(str), adata.obs["_section"].astype(str)))
+    _nsec = lambda ids: len({id2sec[i] for i in ids if i in id2sec})
+    print(f"[niche] coverage: expr(test)={adata.n_obs} cells / {_nsec(aid)} sections; "
+          f"GT∩expr={len(aid & gid)} cells", flush=True)
+    for name, c in preds.items():
+        pid = set(c.index.astype(str)) & aid
+        print(f"[niche]   {name}: {len(pid)} cells / {_nsec(pid)} sections", flush=True)
     common = aid & gid
     for c in preds.values():
         common &= set(c.index.astype(str))
@@ -418,7 +472,9 @@ def main() -> int:
     adata = adata[adata.obs["_key"].isin(common)].copy()
     adata.obs_names = adata.obs["_key"].astype(str).values
     adata = adata[common].copy()  # subset + align to the `common` order
-    print(f"[niche] {len(common)} cells matched across all sources", flush=True)
+    surv = sorted({id2sec[i] for i in common})
+    print(f"[niche] {len(common)} cells matched across all sources, "
+          f"spanning {len(surv)} sections: {surv}", flush=True)
 
     adata.obs["gt_region"] = gt_region.reindex(common).astype("category").values
     K = args.n_clusters or int(adata.obs["gt_region"].nunique())
