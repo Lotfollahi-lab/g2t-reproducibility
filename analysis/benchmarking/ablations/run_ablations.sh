@@ -69,19 +69,23 @@ if [[ "$ABLATION_SET" == "all" ]]; then
   entries+=( "${EXTENDED[@]}" )
 fi
 
-# Optional ONLY filter: keep just the named ablation(s). Handy to re-run a
-# single ablation (e.g. after fixing the diffusion path) without
-# resubmitting the ones that already succeeded. Portable (bash 3.2+).
+# Optional ONLY filter: keep just the named ablation(s), searched against the
+# FULL pool (CORE + EXTENDED) so any defined ablation resolves regardless of
+# ABLATION_SET — e.g. ONLY=K4,K32,mds_eigh runs just those three EXTENDED
+# ablations without ABLATION_SET=all. Handy to run/re-run a specific subset.
+# Portable (bash 3.2+).
 if [[ -n "$ONLY" ]]; then
+  pool=( "${CORE[@]}" "${EXTENDED[@]}" )
   filtered=()
-  for entry in "${entries[@]}"; do
+  for entry in "${pool[@]}"; do
     nm="${entry%%|*}"
     case ",$ONLY," in
       *",$nm,"*) filtered+=( "$entry" ) ;;
     esac
   done
   if [[ ${#filtered[@]} -eq 0 ]]; then
-    echo "ERROR: ONLY='$ONLY' matched no ablations in set '$ABLATION_SET'." >&2
+    echo "ERROR: ONLY='$ONLY' matched no known ablation. Valid names:" >&2
+    echo "       baseline edm_off diffusion heads16 K2 K16 (core); K4 K32 mds_eigh (extended)." >&2
     exit 1
   fi
   entries=( "${filtered[@]}" )
