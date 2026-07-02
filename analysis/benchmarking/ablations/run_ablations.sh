@@ -17,6 +17,7 @@
 #   bash run_ablations.sh                     # submit the CORE ablations
 #   ABLATION_SET=all bash run_ablations.sh    # submit CORE + EXTENDED
 #   ONLY=diffusion bash run_ablations.sh      # submit only the named ablation(s)
+#   SEEDS="5 6 7 8 9" bash run_ablations.sh   # override the seed set (append more seeds)
 #   DRY_RUN=1 bash run_ablations.sh           # print submit commands, don't submit
 # -----------------------------------------------------------------------------
 set -euo pipefail
@@ -25,7 +26,12 @@ set -euo pipefail
 SUBMIT="/nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/lsf/submit_pipeline.sh"
 DATA_DIR="/nfs/team361/sb75/DATASETS/silver/mmc_luna"   # MMC silver h5ads
 EPOCHS=1000
-SEEDS=(0 1 2 3 4)
+# Seeds to submit. Override via env to add more without editing this file, e.g.
+#   SEEDS="5 6 7 8 9" bash run_ablations.sh
+# appends seeds 5-9; the analysis groups by ablation, so the existing 0-4 plus
+# the new 5-9 aggregate to 10 seeds per variant. (`|| true` guards the read
+# from tripping `set -e` at end-of-here-string.)
+read -r -a SEEDS <<< "${SEEDS:-0 1 2 3 4}" || true
 MANIFEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ablation_manifest.csv"
 
 # G2T baseline override string (your scgg_mmc_edm_fm_heads32_fastmds config).
