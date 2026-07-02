@@ -25,10 +25,16 @@ Expected story: g2t ~ reference > luna (and vs celery).
 
 Data facts this script assumes (verified against the codebase):
   * silver AnnData: X = 600-dim latent, obsm['spatial'] = reference coords,
-    obs['cell_id'] = the join id (e.g. "well06_0"), obs['cell_section'].
-  * metadata.csv (Single Cell Portal format): TAB-separated, a second "TYPE"
-    header row to skip; id column "NAME"; label "Sub_molecular_tissue_region".
-  * metadata_pred.csv: index = cell_ID; columns cell_class, coord_X, coord_Y.
+    obs['cell_id'] = the join id (e.g. "well06_0"), obs['cell_section'], and a
+    per-section row position in obs['_bronze_row_pos'] when available. Only
+    *_test.h5ad files are loaded (train objects may use another id scheme).
+  * metadata.csv (Single Cell Portal format): a second "TYPE" header row to
+    skip; id column "NAME"; label "Sub_molecular_tissue_region".
+  * metadata_pred.csv / metadata_true.csv: index = a per-section INTEGER row
+    position (NOT a biological id); columns cell_class, coord_X, coord_Y. The
+    section is the parent folder name; the integer is mapped back to a cell_id
+    through the test AnnData (obs['_bronze_row_pos'] if present, else the
+    positional 0..n-1 order).
 
 Environment: cellcharter + squidpy + scanpy + anndata + scikit-learn + matplotlib.
 """
@@ -54,56 +60,175 @@ METHOD_COLORS = {
 }
 
 
-def load_pred_coords(path: str, x_col: str, y_col: str, label: str = "") -> pd.DataFrame:
-    """metadata_pred.csv (index=cell_ID, cols coord_X/coord_Y). Accepts a file
-    or a directory, in which case it RECURSIVELY globs every metadata_pred.csv
-    at any depth (one per section, e.g. .../model_*/well1_5_0/metadata_pred.csv).
-    Returns a DataFrame indexed by cell id with columns [x, y]."""
-    p = Path(path)
-    if p.is_dir():
-        files = sorted(glob.glob(str(p / "**" / "metadata_pred.csv"), recursive=True))
-        if not files:
-            raise FileNotFoundError(f"No metadata_pred.csv under {p} (run inference first?)")
-        df = pd.concat([pd.read_csv(f, index_col=0) for f in files])
-    else:
-        files = [str(p)]
-        df = pd.read_csv(p, index_col=0)
+def _read_xy(path, x_col, y_col) -> pd.DataFrame:
+    """Read a metadata_{pred,true}.csv -> DataFrame with columns [x, y] and the
+    file's own (integer, per-section) index preserved."""
+    df = pd.read_csv(path, index_col=0)
     for c in (x_col, y_col):
         if c not in df.columns:
             raise KeyError(f"{c!r} not in {path} (cols: {list(df.columns)})")
     out = df[[x_col, y_col]].copy()
-    out.index = out.index.astype(str)
-    n_raw = len(out)
-    out = out[~out.index.duplicated(keep="first")]
     out.columns = ["x", "y"]
-    dup = n_raw - len(out)
-    msg = f"[niche]   {label or path}: {len(files)} file(s), {len(out)} cells"
-    if dup:
-        msg += (f"  (! {dup} duplicate ids dropped — multiple epoch/seed dirs may "
-                f"have been globbed; point at a single results dir)")
-    print(msg, flush=True)
     return out
 
 
-def load_expr(path: str, id_col: str, section_col: str):
-    """Silver AnnData(s): single .h5ad or a directory of per-section .h5ads."""
+def _section_of(path: Path, known) -> "str | None":
+    """Pick the test-section whose name is an exact path component of `path`
+    (longest match wins); fall back to the immediate parent dir name."""
+    parts = set(path.parts)
+    hits = [s for s in known if s in parts]
+    if hits:
+        return max(hits, key=len)
+    pn = path.parent.name
+    return pn if pn in known else None
+
+
+def load_test_expr(path: str, id_col: str, section_col: str):
+    """Load ONLY ``*_test.h5ad`` (train objects may use a different id scheme and
+    are not needed). Records, per cell, its section (from the file name) and the
+    per-section integer row position that ``metadata_pred.csv`` is indexed by
+    (``obs['_bronze_row_pos']`` if present, else positional 0..n-1).
+
+    Returns ``(adata, sec2map)`` where ``sec2map[section][rowpos] = cell_id`` is
+    the bridge from a (folder, integer) pair back to a biological cell id."""
     import anndata as ad
     p = Path(path)
     if p.is_dir():
-        files = sorted(glob.glob(str(p / "*.h5ad")))
+        files = sorted(glob.glob(str(p / "*_test.h5ad")))
         if not files:
-            raise FileNotFoundError(f"No .h5ad under {p}")
-        adata = ad.concat([ad.read_h5ad(f) for f in files], join="outer", merge="same")
+            files = sorted(glob.glob(str(p / "*.h5ad")))
+            if not files:
+                raise FileNotFoundError(f"No *_test.h5ad under {p}")
+            print(f"[niche] WARNING: no *_test.h5ad matched; falling back to all "
+                  f"{len(files)} .h5ad in {p}", file=sys.stderr)
     else:
-        adata = ad.read_h5ad(p)
-    if id_col not in adata.obs:
-        raise KeyError(f"obs[{id_col!r}] missing (have: {list(adata.obs.columns)})")
-    if "spatial" not in adata.obsm:
-        raise KeyError("obsm['spatial'] (reference coords) missing from the AnnData")
-    adata.obs["_key"] = adata.obs[id_col].astype(str).values
+        files = [str(p)]
+
+    parts, sec2map = [], {}
+    for f in files:
+        a = ad.read_h5ad(f)
+        sec = Path(f).name
+        for suf in ("_test.h5ad", ".h5ad"):
+            if sec.endswith(suf):
+                sec = sec[: -len(suf)]
+                break
+        if id_col not in a.obs:
+            raise KeyError(f"obs[{id_col!r}] missing in {f} (have: {list(a.obs.columns)})")
+        if "spatial" not in a.obsm:
+            raise KeyError(f"obsm['spatial'] (reference coords) missing in {f}")
+        n = a.n_obs
+        src = "positional"
+        if "_bronze_row_pos" in a.obs:
+            rp = pd.to_numeric(a.obs["_bronze_row_pos"], errors="coerce").to_numpy()
+            if not np.isnan(rp).any():
+                rowpos = rp.astype(int); src = "_bronze_row_pos"
+            else:
+                rowpos = np.arange(n)
+        else:
+            rowpos = np.arange(n)
+        a.obs["_section"] = sec
+        a.obs["_rowpos"] = rowpos
+        a.obs["_key"] = a.obs[id_col].astype(str).values
+        sec2map[sec] = dict(zip(rowpos.tolist(), a.obs["_key"].tolist()))
+        parts.append(a)
+        print(f"[niche]   {Path(f).name}: section={sec!r}, {n} cells, "
+              f"rowpos∈[{int(rowpos.min())},{int(rowpos.max())}] ({src})", flush=True)
+
+    adata = parts[0] if len(parts) == 1 else ad.concat(parts, join="outer", merge="same")
     if section_col not in adata.obs:
-        adata.obs[section_col] = "all"
-    return adata
+        adata.obs[section_col] = adata.obs["_section"].values
+    print(f"[niche] loaded {adata.n_obs} test cells across {len(sec2map)} sections",
+          flush=True)
+    return adata, sec2map
+
+
+def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
+                                label: str = "", spatial_by_id=None) -> pd.DataFrame:
+    """Directory holding one ``metadata_pred.csv`` per section (at any depth).
+    The section is read from the folder name and the file's integer index is
+    mapped back to a biological ``cell_id`` via ``sec2map``. (If a file is already
+    indexed by non-numeric cell ids, it is used as-is.) Returns a DataFrame
+    indexed by ``cell_id`` with columns [x, y].
+
+    When ``spatial_by_id`` is given, each section's ``metadata_true.csv`` is
+    cross-checked against the AnnData reference coords with a scale-free per-axis
+    correlation — a wrong (but complete) integer->cell_id mapping would scramble
+    coordinates while still "matching" every id, so this guard is what catches it."""
+    p = Path(path)
+    files = [str(p)] if p.is_file() else sorted(
+        glob.glob(str(p / "**" / "metadata_pred.csv"), recursive=True))
+    if not files:
+        raise FileNotFoundError(f"No metadata_pred.csv under {p} (run inference first?)")
+    known = set(sec2map)
+    frames, n_unmapped, secs_seen, verify = [], 0, [], []
+    for f in files:
+        fp = Path(f)
+        xy = _read_xy(f, x_col, y_col)
+        idx_num = pd.to_numeric(xy.index, errors="coerce")
+        if idx_num.notna().all():                    # per-section integer index
+            sec = _section_of(fp, known)
+            if sec is None:
+                print(f"[niche] WARNING: no test section matches {f} "
+                      f"(parent={fp.parent.name!r}); skipping", file=sys.stderr)
+                continue
+            m = sec2map[sec]
+            ints = idx_num.astype(int).to_numpy()
+            ids = [m.get(int(i)) for i in ints]
+            ok = np.array([v is not None for v in ids])
+            n_unmapped += int((~ok).sum())
+            sub = xy.iloc[ok].copy()
+            sub.index = pd.Index([v for v in ids if v is not None], name="cell_id")
+            secs_seen.append(sec)
+            if spatial_by_id is not None:            # sanity-check vs metadata_true
+                tf = fp.with_name("metadata_true.csv")
+                if tf.exists():
+                    try:
+                        t = _read_xy(tf, x_col, y_col)
+                        ti = pd.to_numeric(t.index, errors="coerce").astype("Int64")
+                        rows = [(m.get(int(i)), tx, ty) for i, tx, ty in
+                                zip(ti, t["x"].to_numpy(float), t["y"].to_numpy(float))
+                                if pd.notna(i) and m.get(int(i)) in spatial_by_id]
+                        if len(rows) >= 10:
+                            cid, tx, ty = zip(*rows)
+                            S = np.array([spatial_by_id[c] for c in cid], float)
+                            T = np.column_stack([tx, ty])
+                            cxx = abs(np.corrcoef(T[:, 0], S[:, 0])[0, 1])
+                            cyy = abs(np.corrcoef(T[:, 1], S[:, 1])[0, 1])
+                            cxy = abs(np.corrcoef(T[:, 0], S[:, 1])[0, 1])
+                            cyx = abs(np.corrcoef(T[:, 1], S[:, 0])[0, 1])
+                            verify.append(max(min(cxx, cyy), min(cxy, cyx)))
+                    except Exception:
+                        pass
+        else:                                        # already biological ids
+            sub = xy.copy()
+            sub.index = sub.index.astype(str)
+        frames.append(sub)
+    if not frames:
+        raise RuntimeError(f"No metadata_pred.csv could be matched to a test "
+                           f"section under {p} (section folder names must match "
+                           f"the *_test.h5ad stems).")
+    df = pd.concat(frames)
+    n_raw = len(df)
+    df = df[~df.index.duplicated(keep="first")]
+    dup = n_raw - len(df)
+    msg = (f"[niche]   {label or path}: {len(files)} file(s), "
+           f"{len(set(secs_seen)) or 'n/a'} sections, {len(df)} cells mapped")
+    if n_unmapped:
+        msg += f"  (! {n_unmapped} rows had no cell_id in the test AnnData — dropped)"
+    if dup:
+        msg += f"  (! {dup} duplicate cell_ids dropped)"
+    print(msg, flush=True)
+    if verify:
+        v = float(np.mean(verify))
+        ok = v > 0.9
+        print(f"[niche]   {label or path}: mapping check vs metadata_true "
+              f"(per-axis |corr| with AnnData spatial) = {v:.3f} "
+              f"[{'OK' if ok else 'LOW'}]"
+              + ("" if ok else "  <-- integer->cell_id mapping may be misaligned, OR "
+                               "obsm['spatial'] is imputed rather than the true test "
+                               "coords; inspect before trusting the metrics"),
+              file=sys.stderr)
+    return df
 
 
 def run_cellcharter(adata, rep_key, sample_key, n_layers, n_clusters, seed):
@@ -202,9 +327,11 @@ def main() -> int:
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
-    # ---- 1. expression AnnData (representation + reference coords) ---------
-    print(f"[niche] loading expression: {args.expr_h5ad}", flush=True)
-    adata = load_expr(args.expr_h5ad, args.expr_id_col, args.expr_section_col)
+    # ---- 1. TEST expression AnnData (representation + reference coords) ----
+    print(f"[niche] loading TEST expression: {args.expr_h5ad}", flush=True)
+    adata, sec2map = load_test_expr(args.expr_h5ad, args.expr_id_col, args.expr_section_col)
+    _sp = np.asarray(adata.obsm["spatial"], dtype=float)
+    spatial_by_id = {k: _sp[i] for i, k in enumerate(adata.obs["_key"].astype(str).values)}
 
     # ---- 2. ground-truth region labels (SCP tab file, skip TYPE row) -------
     skip = [int(x) for x in args.gt_skiprows.split(",")] if args.gt_skiprows.strip() else None
@@ -226,22 +353,38 @@ def main() -> int:
     coord_sources = {"luna": args.coords_luna, "g2t": args.coords_g2t}
     if args.coords_celery:
         coord_sources["celery"] = args.coords_celery
-    preds = {name: load_pred_coords(path, args.coord_x_col, args.coord_y_col, label=name)
+    preds = {name: load_pred_coords_by_section(path, sec2map, args.coord_x_col,
+                                               args.coord_y_col, label=name,
+                                               spatial_by_id=spatial_by_id)
              for name, path in coord_sources.items()}
     if args.coords_ref:  # optional external reference; else use obsm['spatial']
-        preds["reference"] = load_pred_coords(args.coords_ref, args.coord_x_col,
-                                              args.coord_y_col, label="reference")
+        preds["reference"] = load_pred_coords_by_section(
+            args.coords_ref, sec2map, args.coord_x_col, args.coord_y_col,
+            label="reference", spatial_by_id=spatial_by_id)
 
     # ---- 4. common cells across expr + GT + every predicted source --------
-    common = set(adata.obs["_key"]) & set(gt_region.index)
+    aid = set(adata.obs["_key"].astype(str))
+    gid = set(gt_region.index.astype(str))
+    common = aid & gid
     for c in preds.values():
-        common &= set(c.index)
+        common &= set(c.index.astype(str))
     common = sorted(common)
     if len(common) < 1000:
+        import itertools
+        ex = lambda s: list(itertools.islice(sorted(s), 5))
+        print("[niche] DIAGNOSTIC — id spaces do not line up:", file=sys.stderr)
+        print(f"  AnnData obs['{args.expr_id_col}'] (n={len(aid)}) e.g. {ex(aid)}", file=sys.stderr)
+        print(f"  AnnData obs_names                 e.g. {list(map(str, adata.obs_names[:5]))}", file=sys.stderr)
+        print(f"  GT '{args.gt_id_col}' (n={len(gid)}) e.g. {ex(gid)}"
+              f"   | cell_id∩GT = {len(aid & gid)}", file=sys.stderr)
+        for name, c in preds.items():
+            pid = set(c.index.astype(str))
+            print(f"  {name} pred cell_id (n={len(pid)}) e.g. {ex(pid)}"
+                  f"   | cell_id∩{name} = {len(aid & pid)}", file=sys.stderr)
         raise RuntimeError(
-            f"Only {len(common)} cells matched across expression, GT labels and all coord "
-            f"sources. Check the id spaces: AnnData obs['{args.expr_id_col}'], "
-            f"metadata '{args.gt_id_col}', and metadata_pred.csv index must be the SAME ids.")
+            f"Only {len(common)} cells matched. See the DIAGNOSTIC above — the id spaces "
+            f"(AnnData obs['{args.expr_id_col}'], metadata '{args.gt_id_col}', metadata_pred "
+            f"index) must share the same cell ids.")
     adata = adata[adata.obs["_key"].isin(common)].copy()
     adata.obs_names = adata.obs["_key"].astype(str).values
     adata = adata[common].copy()  # subset + align to the `common` order
