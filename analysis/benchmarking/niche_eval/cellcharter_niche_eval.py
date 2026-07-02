@@ -179,7 +179,8 @@ def main() -> int:
     # column / format knobs
     ap.add_argument("--gt_col", default="Sub_molecular_tissue_region")
     ap.add_argument("--gt_id_col", default="NAME")
-    ap.add_argument("--gt_sep", default="\t")
+    ap.add_argument("--gt_sep", default="auto",
+                    help="'auto' sniffs comma vs tab from the header; or force ',' / '\\t'")
     ap.add_argument("--gt_skiprows", default="1",
                     help="rows to skip after the header (SCP 'TYPE' row); '' for none")
     ap.add_argument("--expr_id_col", default="cell_id")
@@ -207,7 +208,14 @@ def main() -> int:
 
     # ---- 2. ground-truth region labels (SCP tab file, skip TYPE row) -------
     skip = [int(x) for x in args.gt_skiprows.split(",")] if args.gt_skiprows.strip() else None
-    gt = pd.read_csv(args.gt_metadata, sep=args.gt_sep, skiprows=skip)
+    if args.gt_sep == "auto":
+        with open(args.gt_metadata) as _f:
+            _hdr = _f.readline()
+        gt_sep = "\t" if _hdr.count("\t") > _hdr.count(",") else ","
+        print(f"[niche] gt_metadata delimiter auto-detected: {gt_sep!r}", flush=True)
+    else:
+        gt_sep = args.gt_sep
+    gt = pd.read_csv(args.gt_metadata, sep=gt_sep, skiprows=skip)
     for c in (args.gt_id_col, args.gt_col):
         if c not in gt.columns:
             raise KeyError(f"gt_metadata needs {c!r}; have {list(gt.columns)[:20]}")
