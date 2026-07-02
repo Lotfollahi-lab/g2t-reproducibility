@@ -49,8 +49,9 @@ METRICS = {
     "sum_rssd_mean": ("Sum RSSD (per cell class)", -1),
 }
 
-BASELINE_COLOR = "#E8853A"   # orange, matches the G2T bar in Figs 2/3
-OTHER_COLOR = "#4C78A8"      # steel blue for the ablations
+BASELINE_COLOR = "#D55E00"   # vermillion — the G2T colour in Figs 2/3
+                             # (plots/plot_method_comparison.py :: METHODS["G2T"])
+OTHER_COLOR = "#4C78A8"      # steel blue for the (non-method) ablation variants
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +273,53 @@ def make_svg(man: pd.DataFrame, inf_root: Path, svg_script: Path, outdir: Path,
 
 
 # ---------------------------------------------------------------------------
+# Optional: top-2 MDS variance fraction (how 2-D-embeddable D_hat is).
+# NOTE: this cannot be computed from the metric CSVs (they don't contain the
+# predicted distance matrix). It aggregates the per-slice
+# "[mds_var] top2_frac=<x>" lines that the EDM head prints at eval when run
+# with SCGG_LOG_MDS_VAR=1 (see scgg/src/models/edm_head.py).
+# ---------------------------------------------------------------------------
+def report_mds_variance(pattern: str, outdir: Path) -> None:
+    import glob as _glob
+    import re as _re
+    files = sorted(_glob.glob(pattern))
+    if not files:
+        print(f"[mds-var] no files matched {pattern!r}")
+        return
+    fracs = []
+    for f in files:
+        try:
+            txt = Path(f).read_text(errors="ignore")
+        except Exception:
+            continue
+        for tok in _re.findall(r"top2_frac=([0-9]*\.?[0-9]+)", txt):
+            v = float(tok)
+            if v == v:  # drop NaN
+                fracs.append(v)
+    if not fracs:
+        print(f"[mds-var] matched {len(files)} file(s) but found no "
+              f"'top2_frac=' lines. Did the eval run with SCGG_LOG_MDS_VAR=1?")
+        return
+    n = len(fracs)
+    mean = sum(fracs) / n
+    sd = (sum((x - mean) ** 2 for x in fracs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+    print("\n" + "=" * 72)
+    print(f"[mds-var] top-2 MDS variance fraction over {n} slice(s): "
+          f"{100*mean:.1f} +/- {100*sd:.1f}%  "
+          f"(min {100*min(fracs):.1f}%, max {100*max(fracs):.1f}%)")
+    print("[mds-var] paper sentence (paste into Section 2.4):")
+    print(f'   "the top two MDS eigenvalues capture {100*mean:.1f}\\% (SD '
+          f'{100*sd:.1f}) of the positive-eigenvalue variance of '
+          f'$\\widehat{{\\mathbf{{D}}}}$ on the held-out slices, confirming the '
+          f'predicted matrices are near-2-D-embeddable."')
+    print("=" * 72)
+    out_csv = outdir / "mds_variance_summary.csv"
+    out_csv.write_text("n_slices,mean_top2_frac,sd_top2_frac\n"
+                       f"{n},{mean:.6f},{sd:.6f}\n")
+    print(f"[mds-var] wrote {out_csv}")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     here = Path(__file__).resolve().parent
     ap = argparse.ArgumentParser(
@@ -298,13 +346,27 @@ def main() -> int:
     ap.add_argument("--svg_ablation", default="baseline")
     ap.add_argument("--svg_seed", default="0")
     ap.add_argument("--svg_top_k", type=int, default=4)
+    # optional: top-2 MDS variance fraction (reviewer request)
+    ap.add_argument("--mds_var_logs", default=None,
+                    help="Glob of eval log files with '[mds_var] top2_frac=' lines "
+                         "(from an SCGG_LOG_MDS_VAR=1 eval run); aggregates them.")
+    ap.add_argument("--mds_var_only", action="store_true",
+                    help="With --mds_var_logs, only run that aggregation and exit.")
     args = ap.parse_args()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Optional: aggregate the top-2 MDS variance fraction emitted by the EDM
+    # head under SCGG_LOG_MDS_VAR=1. Can run standalone via --mds_var_only.
+    if args.mds_var_logs:
+        report_mds_variance(args.mds_var_logs, outdir)
+        if args.mds_var_only:
+            return 0
 
     manifest = Path(args.manifest)
     if not manifest.exists():
         raise SystemExit(f"Manifest not found: {manifest}")
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
     inf_root = Path(args.artifacts_root) / args.dataset / "scgg_inference"
     man = pd.read_csv(manifest)
 
