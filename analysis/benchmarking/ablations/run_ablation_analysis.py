@@ -106,7 +106,15 @@ def score_runs(man: pd.DataFrame, compute_script: Path, dataset: str,
         cmd += ["--workers", str(workers)]
     print(f"[score] scoring {len(ts_list)} run(s) via compute_extended_metrics.py ...")
     print("        " + " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    rc = subprocess.run(cmd).returncode
+    if rc != 0:
+        # Partial failure is expected when the manifest lists timestamps whose run
+        # dir was removed (e.g. a re-submitted batch). Don't abort — the aggregate
+        # step below uses only the runs that actually have extended_metrics.csv and
+        # reports the rest as 'missing'.
+        print(f"[score] WARNING: compute_extended_metrics.py exited {rc}; some runs "
+              f"failed to score (commonly manifest timestamps whose run dir no longer "
+              f"exists). Continuing with the runs that DID score.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
