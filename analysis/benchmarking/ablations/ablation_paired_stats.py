@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -58,6 +59,10 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--per_seed", default=str(here / "ablation_per_seed.csv"))
     ap.add_argument("--baseline", default="baseline")
+    ap.add_argument("--min_seeds", type=int, default=0,
+                    help="only report ablations with >= this many distinct seeds "
+                         "(baseline always kept). Use 10 to restrict to the "
+                         "fully-run core set.")
     ap.add_argument("--out", default=str(here / "ablation_stats.csv"))
     args = ap.parse_args()
 
@@ -66,6 +71,30 @@ def main() -> int:
         if req not in df.columns:
             raise SystemExit(f"{args.per_seed} missing column {req!r} "
                              f"(have {list(df.columns)})")
+    # De-dup repeated (ablation, seed) rows (e.g. a run re-submitted); keep last.
+    ndup = int(df.duplicated(["ablation", "seed"]).sum())
+    if ndup:
+        print(f"[stats] WARNING: {ndup} duplicate (ablation, seed) row(s) in "
+              f"{Path(args.per_seed).name} — keeping the last of each.")
+        df = df.drop_duplicates(["ablation", "seed"], keep="last")
+    # Show exactly what we're working with, so a stale/short CSV is obvious.
+    sc = df.groupby("ablation")["seed"].nunique()
+    print(f"[stats] {Path(args.per_seed).name}: {len(df)} rows; distinct seeds per "
+          f"ablation:\n" + sc.to_string())
+    if int(sc.max()) < 10:
+        print(f"[stats] NOTE: max {int(sc.max())} seeds found (<10). If you expected "
+              f"10, re-run `python run_ablation_analysis.py` so ablation_per_seed.csv "
+              f"is regenerated from the current (10-seed) manifest.", file=sys.stderr)
+
+    # optional: keep only ablations with enough seeds (baseline always kept)
+    if args.min_seeds > 0:
+        keep = set(sc[sc >= args.min_seeds].index) | {args.baseline}
+        dropped = sorted(set(df["ablation"]) - keep)
+        if dropped:
+            print(f"[stats] --min_seeds {args.min_seeds}: dropping "
+                  f"{dropped} (fewer than {args.min_seeds} seeds).")
+        df = df[df["ablation"].isin(keep)]
+
     base = df[df["ablation"] == args.baseline].set_index("seed")
     if base.empty:
         raise SystemExit(f"No '{args.baseline}' rows in {args.per_seed}")

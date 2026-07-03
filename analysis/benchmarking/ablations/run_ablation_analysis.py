@@ -132,7 +132,15 @@ def load_per_run(man: pd.DataFrame, inf_root: Path) -> pd.DataFrame:
             print(f"            - {ab} seed{s} ({ts})")
     if not per_run:
         raise SystemExit("No per-run metrics found. Run without --skip_score first.")
-    return pd.DataFrame(per_run)
+    df = pd.DataFrame(per_run)
+    # De-dup (ablation, seed) — runs submitted in >1 batch (e.g. a 5-seed then a
+    # 10-seed batch) record the same seed twice; keep the last SCORED run of each.
+    ndup = int(df.duplicated(["ablation", "seed"]).sum())
+    if ndup:
+        print(f"[aggregate] {ndup} duplicate (ablation, seed) run(s) from multiple "
+              f"submission batches — keeping the last scored one of each.")
+        df = df.drop_duplicates(["ablation", "seed"], keep="last").reset_index(drop=True)
+    return df
 
 
 def aggregate(df: pd.DataFrame) -> pd.DataFrame:
