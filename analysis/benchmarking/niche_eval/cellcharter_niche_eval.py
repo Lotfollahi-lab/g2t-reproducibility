@@ -48,6 +48,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Bump when the join/mapping logic changes; printed at startup so a stale farm
+# copy (sync lag) is obvious in the job log.
+__version__ = "2026-07-03-niche-eval-v4-obsname-map"
+
 # Per-method colours — MUST match the benchmark figures
 # (scgg-reproducibility/analysis/benchmarking/plots/plot_method_comparison.py
 # :: METHODS, Okabe-Ito). 'reference' is the imputed ceiling (not a benchmarked
@@ -397,6 +401,7 @@ def main() -> int:
                                  adjusted_rand_score as ari)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    print(f"[niche] cellcharter_niche_eval.py {__version__}", flush=True)
 
     # ---- 1. TEST expression AnnData (representation + reference coords) ----
     print(f"[niche] loading TEST expression: {args.expr_h5ad}", flush=True)
