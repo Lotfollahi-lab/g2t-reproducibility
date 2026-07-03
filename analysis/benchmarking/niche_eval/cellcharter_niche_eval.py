@@ -50,7 +50,7 @@ import pandas as pd
 
 # Bump when the join/mapping logic changes; printed at startup so a stale farm
 # copy (sync lag) is obvious in the job log.
-__version__ = "2026-07-03-niche-eval-v5-shuffled-floor"
+__version__ = "2026-07-03-niche-eval-v6-resolution-sweep"
 
 # Per-method colours — MUST match the benchmark figures
 # (scgg-reproducibility/analysis/benchmarking/plots/plot_method_comparison.py
@@ -306,7 +306,11 @@ def load_pred_coords_by_section(path: str, sec2map, x_col: str, y_col: str,
     return df
 
 
-def run_cellcharter(adata, rep_key, sample_key, n_layers, n_clusters, seed):
+def cellcharter_aggregate(adata, rep_key, sample_key, n_layers):
+    """Build the spatial graph and neighbour-aggregated features (-> obsm
+    'X_cellcharter'). This depends on the COORDINATES but NOT on the cluster
+    count, so it can be computed once per coordinate source and reused across a
+    resolution (K) sweep."""
     import squidpy as sq
     import cellcharter as cc
     sq.gr.spatial_neighbors(adata, library_key=sample_key,
@@ -314,9 +318,21 @@ def run_cellcharter(adata, rep_key, sample_key, n_layers, n_clusters, seed):
     cc.gr.remove_long_links(adata)
     cc.gr.aggregate_neighbors(adata, n_layers=n_layers, use_rep=rep_key,
                               out_key="X_cellcharter")
+
+
+def cellcharter_cluster(adata, n_clusters, seed):
+    """GMM niche clustering at a given resolution K on the pre-aggregated
+    'X_cellcharter' features."""
+    import cellcharter as cc
     gmm = cc.tl.Cluster(n_clusters=n_clusters, random_state=seed)
     gmm.fit(adata, use_rep="X_cellcharter")
     return np.asarray(gmm.predict(adata, use_rep="X_cellcharter"))
+
+
+def run_cellcharter(adata, rep_key, sample_key, n_layers, n_clusters, seed):
+    """Backward-compatible single call: aggregate then cluster at one K."""
+    cellcharter_aggregate(adata, rep_key, sample_key, n_layers)
+    return cellcharter_cluster(adata, n_clusters, seed)
 
 
 def make_metrics_barplot(res: pd.DataFrame, out: Path) -> None:
@@ -364,6 +380,35 @@ def make_metrics_barplot(res: pd.DataFrame, out: Path) -> None:
     print(f"[niche] wrote {out/'niche_eval_metrics.png'} and .pdf")
 
 
+def make_resolution_plot(res: pd.DataFrame, out: Path) -> None:
+    """NMI and ARI vs resolution (niche count K), one line per coordinate source.
+    Colours match the benchmark figures (METHOD_COLORS)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sources = list(dict.fromkeys(res["source"].tolist()))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
+    for ax, metric in zip(axes, ["NMI", "ARI"]):
+        for s in sources:
+            g = res[res["source"] == s].sort_values("resolution")
+            ax.plot(g["resolution"], g[metric], marker="o", linewidth=1.6,
+                    label=s, color=METHOD_COLORS.get(s, "#4C78A8"))
+        ax.set_xlabel("resolution — number of niches $K$")
+        ax.set_ylabel(f"{metric} vs GT tissue regions")
+        ax.grid(alpha=0.3, linewidth=0.5)
+        ax.set_axisbelow(True)
+        ax.set_title(metric)
+    axes[0].legend(frameon=False, fontsize=9)
+    fig.suptitle("CellCharter niche recovery across resolutions "
+                 "(CNS test; one run per method)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(out / "niche_eval_resolution.png", dpi=200, bbox_inches="tight")
+    fig.savefig(out / "niche_eval_resolution.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[niche] wrote {out/'niche_eval_resolution.png'} and .pdf")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -390,7 +435,17 @@ def main() -> int:
     # method knobs (identical across all sources)
     ap.add_argument("--n_latent", type=int, default=50, help="PCA dim of the 600-d latent")
     ap.add_argument("--n_layers", type=int, default=3)
-    ap.add_argument("--n_clusters", type=int, default=0, help="0 = #unique GT regions")
+    ap.add_argument("--n_clusters", type=int, default=0,
+                    help="single niche count K (0 = #unique GT regions). Ignored when "
+                         "a resolution sweep is active (the default).")
+    # resolution sweep (DEFAULT): one run per method, several niche counts K.
+    ap.add_argument("--resolution_factors", default="0.5,0.75,1.0,1.5,2.0",
+                    help="comma list of multipliers of #GT-regions to use as the K "
+                         "sweep (DEFAULT = 5 resolutions). Use a single value (e.g. "
+                         "'1.0') for the old single-clustering behaviour.")
+    ap.add_argument("--resolutions", default=None,
+                    help="explicit comma list of K values to sweep; overrides "
+                         "--resolution_factors and --n_clusters.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--controls", action="store_true",
                     help="also score a shuffled-coordinate FLOOR (coords permuted "
@@ -486,9 +541,18 @@ def main() -> int:
           f"spanning {len(surv)} sections: {surv}", flush=True)
 
     adata.obs["gt_region"] = gt_region.reindex(common).astype("category").values
-    K = args.n_clusters or int(adata.obs["gt_region"].nunique())
-    print(f"[niche] K={K} (GT has {adata.obs['gt_region'].nunique()} unique "
-          f"{args.gt_col!r} regions)", flush=True)
+    n_gt = int(adata.obs["gt_region"].nunique())
+    # Resolution sweep (default): the niche count K is the CellCharter "resolution".
+    if args.resolutions:
+        Ks = sorted({int(x) for x in args.resolutions.split(",") if x.strip()})
+    elif args.n_clusters:
+        Ks = [int(args.n_clusters)]
+    else:
+        facs = [float(x) for x in args.resolution_factors.split(",") if x.strip()]
+        Ks = sorted({max(2, int(round(f * n_gt))) for f in facs})
+    K_ref = min(Ks, key=lambda k: abs(k - n_gt))   # K nearest #GT-regions, for the map
+    print(f"[niche] GT has {n_gt} unique {args.gt_col!r} regions; "
+          f"resolution sweep K in {Ks} (niche map uses K={K_ref})", flush=True)
 
     # ---- 5. shared representation: PCA of the 600-dim latent (once) --------
     X = adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
@@ -513,11 +577,14 @@ def main() -> int:
             shuf_xy[idx] = ref_xy[rng.permutation(idx)]
         order = order + ["shuffled"]
 
-    # ---- 6. CellCharter per coordinate source -----------------------------
+    # ---- 6. CellCharter per coordinate source, swept over resolutions ------
+    # The graph + neighbour aggregation depend on the COORDS only, so build them
+    # ONCE per source and reuse across the K sweep (only the GMM re-fits per K).
     rows = []
     labels = pd.DataFrame(index=common)
     labels["section"] = adata.obs[args.expr_section_col].values
     labels["gt_region"] = adata.obs["gt_region"].values
+    gt_vals = adata.obs["gt_region"].values
     for name in order:
         if name == "reference" and "reference" not in preds:
             adata.obsm["spatial"] = ref_xy
@@ -525,15 +592,18 @@ def main() -> int:
             adata.obsm["spatial"] = shuf_xy
         else:
             adata.obsm["spatial"] = preds[name].reindex(common)[["x", "y"]].to_numpy(float)
-        print(f"[niche] CellCharter on '{name}' coords ...", flush=True)
-        niche = run_cellcharter(adata, "X_rep", args.expr_section_col,
-                                args.n_layers, K, args.seed)
-        labels[f"niche_{name}"] = niche
-        rows.append({"source": name, "n_cells": len(common), "n_clusters": K,
-                     "NMI": nmi(adata.obs["gt_region"].values, niche),
-                     "ARI": ari(adata.obs["gt_region"].values, niche)})
-        print(f"[niche]   {name}: NMI={rows[-1]['NMI']:.4f}  ARI={rows[-1]['ARI']:.4f}",
+        print(f"[niche] '{name}': building spatial graph + aggregating (once) ...",
               flush=True)
+        cellcharter_aggregate(adata, "X_rep", args.expr_section_col, args.n_layers)
+        for K in Ks:
+            niche = cellcharter_cluster(adata, K, args.seed)
+            rows.append({"source": name, "resolution": K, "n_cells": len(common),
+                         "NMI": float(nmi(gt_vals, niche)),
+                         "ARI": float(ari(gt_vals, niche))})
+            if K == K_ref:
+                labels[f"niche_{name}"] = niche
+            print(f"[niche]   {name} K={K}: NMI={rows[-1]['NMI']:.4f}  "
+                  f"ARI={rows[-1]['ARI']:.4f}", flush=True)
 
     res = pd.DataFrame(rows)
     res.to_csv(out / "niche_eval_metrics.csv", index=False)
@@ -541,9 +611,12 @@ def main() -> int:
     print("\n" + res.to_string(index=False))
     print(f"\n[niche] wrote {out/'niche_eval_metrics.csv'} and {out/'niche_labels.csv'}")
 
-    # ---- 7a. quantitative metrics bar chart (NMI/ARI per source) ----------
+    # ---- 7a. quantitative figure: resolution sweep, else per-source bars --
     try:
-        make_metrics_barplot(res, out)
+        if res["resolution"].nunique() > 1:
+            make_resolution_plot(res, out)
+        else:
+            make_metrics_barplot(res, out)
     except Exception as e:  # never fail the run over a plot; CSV is already saved
         print(f"[niche] metrics plot skipped: {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -561,7 +634,8 @@ def main() -> int:
             codes = pd.Categorical(labels.loc[m, col]).codes
             ax.scatter(xy[:, 0], xy[:, 1], c=codes, s=3, cmap="tab20", linewidths=0)
             ax.set_title(title, fontsize=10); ax.set_aspect("equal"); ax.axis("off")
-        fig.suptitle(f"CNS section {sec}: niche recovery vs ground-truth regions", fontsize=13)
+        fig.suptitle(f"CNS section {sec}: niche recovery vs ground-truth regions "
+                     f"(K={K_ref})", fontsize=13)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
         fig.savefig(out / "niche_maps.png", dpi=200, bbox_inches="tight")
         print(f"[niche] wrote {out/'niche_maps.png'} (section {sec})")
