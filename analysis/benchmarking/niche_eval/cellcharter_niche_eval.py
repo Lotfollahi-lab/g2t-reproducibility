@@ -50,7 +50,7 @@ import pandas as pd
 
 # Bump when the join/mapping logic changes; printed at startup so a stale farm
 # copy (sync lag) is obvious in the job log.
-__version__ = "2026-07-03-niche-eval-v6-resolution-sweep"
+__version__ = "2026-07-03-niche-eval-v7-cn-readout"
 
 # Per-method colours — MUST match the benchmark figures
 # (scgg-reproducibility/analysis/benchmarking/plots/plot_method_comparison.py
@@ -335,6 +335,34 @@ def run_cellcharter(adata, rep_key, sample_key, n_layers, n_clusters, seed):
     return cellcharter_cluster(adata, n_clusters, seed)
 
 
+def neighbour_class_composition(adata, class_key):
+    """Cellular-Neighbourhood (CN) features (Schurch/Nolan): each cell's spatial
+    neighbourhood cell-TYPE composition, using the SAME graph CellCharter built
+    (obsp['spatial_connectivities'], i.e. pruned Delaunay per section). Returns an
+    (N x n_classes) matrix of neighbour class fractions (self included).
+
+    This is coordinate-driven but expression-light (depends only on which cells
+    are neighbours and their discrete class), so it probes coordinate quality via
+    a different lens than the shared expression latent."""
+    import scipy.sparse as sp
+    A = adata.obsp["spatial_connectivities"]
+    A = (A > 0).astype(float)                      # binary adjacency
+    A = A + sp.eye(A.shape[0], format="csr")       # include self
+    cats = pd.Categorical(adata.obs[class_key].astype(str))
+    onehot = np.zeros((adata.n_obs, len(cats.categories)), dtype=float)
+    onehot[np.arange(adata.n_obs), cats.codes] = 1.0
+    deg = np.asarray(A.sum(1)).ravel()
+    deg[deg == 0] = 1.0
+    return np.asarray(A @ onehot) / deg[:, None]   # row-normalised composition
+
+
+def cn_cluster(comp, n_clusters, seed):
+    """k-means niches on the CN composition features."""
+    from sklearn.cluster import KMeans
+    return KMeans(n_clusters=n_clusters, random_state=seed,
+                  n_init=10).fit_predict(comp)
+
+
 def make_metrics_barplot(res: pd.DataFrame, out: Path) -> None:
     """Grouped bar chart of NMI + ARI per coordinate source (paper-ready)."""
     import matplotlib
@@ -380,7 +408,10 @@ def make_metrics_barplot(res: pd.DataFrame, out: Path) -> None:
     print(f"[niche] wrote {out/'niche_eval_metrics.png'} and .pdf")
 
 
-def make_resolution_plot(res: pd.DataFrame, out: Path) -> None:
+def make_resolution_plot(res: pd.DataFrame, out: Path,
+                         fname: str = "niche_eval_resolution",
+                         title: str = "CellCharter niche recovery across resolutions "
+                                      "(CNS test; one run per method)") -> None:
     """NMI and ARI vs resolution (niche count K), one line per coordinate source.
     Colours match the benchmark figures (METHOD_COLORS)."""
     import matplotlib
@@ -400,13 +431,12 @@ def make_resolution_plot(res: pd.DataFrame, out: Path) -> None:
         ax.set_axisbelow(True)
         ax.set_title(metric)
     axes[0].legend(frameon=False, fontsize=9)
-    fig.suptitle("CellCharter niche recovery across resolutions "
-                 "(CNS test; one run per method)", fontsize=12)
+    fig.suptitle(title, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(out / "niche_eval_resolution.png", dpi=200, bbox_inches="tight")
-    fig.savefig(out / "niche_eval_resolution.pdf", bbox_inches="tight")
+    fig.savefig(out / f"{fname}.png", dpi=200, bbox_inches="tight")
+    fig.savefig(out / f"{fname}.pdf", bbox_inches="tight")
     plt.close(fig)
-    print(f"[niche] wrote {out/'niche_eval_resolution.png'} and .pdf")
+    print(f"[niche] wrote {out/(fname + '.png')} and .pdf")
 
 
 def main() -> int:
@@ -446,6 +476,12 @@ def main() -> int:
     ap.add_argument("--resolutions", default=None,
                     help="explicit comma list of K values to sweep; overrides "
                          "--resolution_factors and --n_clusters.")
+    # second, independent read-out: Cellular-Neighbourhood (CN) composition
+    ap.add_argument("--no_cn", action="store_true",
+                    help="disable the Cellular-Neighbourhood (cell-type composition) "
+                         "read-out that runs alongside CellCharter (on by default).")
+    ap.add_argument("--class_key", default="cell_class",
+                    help="obs column with discrete cell types, for the CN read-out.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--controls", action="store_true",
                     help="also score a shuffled-coordinate FLOOR (coords permuted "
@@ -577,10 +613,16 @@ def main() -> int:
             shuf_xy[idx] = ref_xy[rng.permutation(idx)]
         order = order + ["shuffled"]
 
-    # ---- 6. CellCharter per coordinate source, swept over resolutions ------
+    # ---- 6. per coordinate source, swept over resolutions -----------------
     # The graph + neighbour aggregation depend on the COORDS only, so build them
-    # ONCE per source and reuse across the K sweep (only the GMM re-fits per K).
-    rows = []
+    # ONCE per source and reuse across the K sweep (only the clustering re-fits).
+    # Two independent read-outs share that graph: CellCharter (GMM on the
+    # aggregated expression latent) and CN (k-means on neighbour class composition).
+    do_cn = (not args.no_cn) and (args.class_key in adata.obs)
+    if (not args.no_cn) and args.class_key not in adata.obs:
+        print(f"[niche] CN read-out disabled: obs[{args.class_key!r}] not found "
+              f"(have {list(adata.obs.columns)[:12]}...)", file=sys.stderr)
+    rows, rows_cn = [], []
     labels = pd.DataFrame(index=common)
     labels["section"] = adata.obs[args.expr_section_col].values
     labels["gt_region"] = adata.obs["gt_region"].values
@@ -595,6 +637,7 @@ def main() -> int:
         print(f"[niche] '{name}': building spatial graph + aggregating (once) ...",
               flush=True)
         cellcharter_aggregate(adata, "X_rep", args.expr_section_col, args.n_layers)
+        comp = neighbour_class_composition(adata, args.class_key) if do_cn else None
         for K in Ks:
             niche = cellcharter_cluster(adata, K, args.seed)
             rows.append({"source": name, "resolution": K, "n_cells": len(common),
@@ -602,19 +645,37 @@ def main() -> int:
                          "ARI": float(ari(gt_vals, niche))})
             if K == K_ref:
                 labels[f"niche_{name}"] = niche
-            print(f"[niche]   {name} K={K}: NMI={rows[-1]['NMI']:.4f}  "
-                  f"ARI={rows[-1]['ARI']:.4f}", flush=True)
+            msg = f"[niche]   {name} K={K}: [CellCharter] NMI={rows[-1]['NMI']:.4f} ARI={rows[-1]['ARI']:.4f}"
+            if do_cn:
+                niche_cn = cn_cluster(comp, K, args.seed)
+                rows_cn.append({"source": name, "resolution": K, "n_cells": len(common),
+                                "NMI": float(nmi(gt_vals, niche_cn)),
+                                "ARI": float(ari(gt_vals, niche_cn))})
+                if K == K_ref:
+                    labels[f"niche_cn_{name}"] = niche_cn
+                msg += f"  [CN] NMI={rows_cn[-1]['NMI']:.4f} ARI={rows_cn[-1]['ARI']:.4f}"
+            print(msg, flush=True)
 
     res = pd.DataFrame(rows)
     res.to_csv(out / "niche_eval_metrics.csv", index=False)
     labels.to_csv(out / "niche_labels.csv")
-    print("\n" + res.to_string(index=False))
+    print("\n[CellCharter]\n" + res.to_string(index=False))
     print(f"\n[niche] wrote {out/'niche_eval_metrics.csv'} and {out/'niche_labels.csv'}")
+    res_cn = pd.DataFrame(rows_cn) if rows_cn else None
+    if res_cn is not None:
+        res_cn.to_csv(out / "niche_eval_cn_metrics.csv", index=False)
+        print("\n[CN: neighbour cell-type composition]\n" + res_cn.to_string(index=False))
+        print(f"[niche] wrote {out/'niche_eval_cn_metrics.csv'}")
 
-    # ---- 7a. quantitative figure: resolution sweep, else per-source bars --
+    # ---- 7a. quantitative figure(s): resolution sweep, else per-source bars
     try:
         if res["resolution"].nunique() > 1:
             make_resolution_plot(res, out)
+            if res_cn is not None:
+                make_resolution_plot(
+                    res_cn, out, fname="niche_eval_cn_resolution",
+                    title="Cellular-Neighbourhood (cell-type composition) niche "
+                          "recovery across resolutions (CNS test)")
         else:
             make_metrics_barplot(res, out)
     except Exception as e:  # never fail the run over a plot; CSV is already saved
