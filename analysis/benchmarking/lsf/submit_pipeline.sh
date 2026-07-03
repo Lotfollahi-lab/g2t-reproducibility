@@ -672,6 +672,14 @@ JOB_SCRIPT="$LOG_DIR/job.sh"
     # Also forward the artifacts root so the runner / pipeline reads
     # the same place the submitter wrote logs to.
     printf 'export SCGG_ARTIFACTS_ROOT=%q\n'     "$ARTIFACTS_ROOT"
+    # Optional diagnostic passthrough: when the submitter exports
+    # SCGG_LOG_MDS_VAR (a CSV path), forward it so edm_head.py logs the
+    # top-2 MDS eigenvalue variance-explained per (reverse step, slice).
+    # Used for the one-off "how 2-D-embeddable is D_hat?" measurement
+    # (analyse_mds_var.py). Off by default — no effect on normal runs.
+    if [[ -n "${SCGG_LOG_MDS_VAR:-}" ]]; then
+        printf 'export SCGG_LOG_MDS_VAR=%q\n'    "$SCGG_LOG_MDS_VAR"
+    fi
 
     # Match BLAS/MKL/OpenMP thread counts to the LSF -n value so
     # PyTorch's CPU matmul ACTUALLY uses all the cores we requested.
