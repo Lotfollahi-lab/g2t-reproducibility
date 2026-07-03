@@ -119,7 +119,7 @@ for s in $(printf '%s\n' "${!LMAP[@]}" | sort -n); do
     --gt_metadata '$GT_METADATA' --gt_col '$GT_COL' --gt_id_col '$GT_ID_COL' \
     --expr_id_col '$EXPR_ID_COL' \
     --n_latent $N_LATENT --n_layers $N_LAYERS --n_clusters $N_CLUSTERS \
-    --seed $s --out '$OUT/seed$s'"
+    --controls --seed $s --out '$OUT/seed$s'"
 
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "   [dry-run] $CMD"

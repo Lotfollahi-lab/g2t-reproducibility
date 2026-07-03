@@ -50,7 +50,7 @@ import pandas as pd
 
 # Bump when the join/mapping logic changes; printed at startup so a stale farm
 # copy (sync lag) is obvious in the job log.
-__version__ = "2026-07-03-niche-eval-v4-obsname-map"
+__version__ = "2026-07-03-niche-eval-v5-shuffled-floor"
 
 # Per-method colours — MUST match the benchmark figures
 # (scgg-reproducibility/analysis/benchmarking/plots/plot_method_comparison.py
@@ -392,6 +392,10 @@ def main() -> int:
     ap.add_argument("--n_layers", type=int, default=3)
     ap.add_argument("--n_clusters", type=int, default=0, help="0 = #unique GT regions")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--controls", action="store_true",
+                    help="also score a shuffled-coordinate FLOOR (coords permuted "
+                         "within each section): bounds the expression-only baseline, "
+                         "so you can tell real niche recovery from expression leakage")
     ap.add_argument("--plot_section", default=None)
     ap.add_argument("--out", default="./niche_eval_out")
     args = ap.parse_args()
@@ -497,6 +501,17 @@ def main() -> int:
     # reference coords default to the AnnData's imputed obsm['spatial']
     ref_xy = adata.obsm["spatial"].copy()
     order = ["reference", "luna", "g2t"] + (["celery"] if "celery" in preds else [])
+    shuf_xy = None
+    if args.controls:
+        # floor: permute coords WITHIN each section (kills true neighbourhoods,
+        # keeps the coordinate distribution) -> expression-only baseline.
+        rng = np.random.default_rng(args.seed)
+        shuf_xy = ref_xy.copy()
+        sec_arr = adata.obs[args.expr_section_col].to_numpy()
+        for s in pd.unique(sec_arr):
+            idx = np.where(sec_arr == s)[0]
+            shuf_xy[idx] = ref_xy[rng.permutation(idx)]
+        order = order + ["shuffled"]
 
     # ---- 6. CellCharter per coordinate source -----------------------------
     rows = []
@@ -506,6 +521,8 @@ def main() -> int:
     for name in order:
         if name == "reference" and "reference" not in preds:
             adata.obsm["spatial"] = ref_xy
+        elif name == "shuffled":
+            adata.obsm["spatial"] = shuf_xy
         else:
             adata.obsm["spatial"] = preds[name].reindex(common)[["x", "y"]].to_numpy(float)
         print(f"[niche] CellCharter on '{name}' coords ...", flush=True)
