@@ -1,0 +1,91 @@
+2026-07-03 16:50:30,411 [INFO] scgg_train: Run timestamp: 20260530_165229
+2026-07-03 16:50:30,411 [INFO] scgg_train: Output dir:    /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229
+2026-07-03 16:50:30,512 [INFO] scgg_train: [runtime] start phase: csv_build
+2026-07-03 16:50:30,515 [INFO] scgg_train: Silver dir: /nfs/team361/sb75/DATASETS/silver/mmc_luna (33 *_train.h5ad, 31 *_test.h5ad)
+2026-07-03 16:50:30,519 [INFO] scgg_train: LUNA CSVs already exist under work/; reusing
+2026-07-03 16:50:30,680 [INFO] scgg_train: [runtime] end   phase: csv_build  (0.2s)  peak_gpu=1MiB  peak_rss=103MiB
+2026-07-03 16:50:30,824 [INFO] scgg_train: [runtime] start phase: training
+2026-07-03 16:50:30,826 [INFO] scgg_train: Invoking LUNA via launcher (mode=test_only):
+2026-07-03 16:50:30,826 [INFO] scgg_train:     /nfs/team361/sb75/.venvs/scgg/bin/python
+2026-07-03 16:50:30,826 [INFO] scgg_train:     /nfs/team361/sb75/scgg/scripts/_luna_runner.py
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --luna_repo
+2026-07-03 16:50:30,826 [INFO] scgg_train:     /nfs/team361/sb75/scgg/src
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --mode
+2026-07-03 16:50:30,826 [INFO] scgg_train:     test_only
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --wandb_project
+2026-07-03 16:50:30,826 [INFO] scgg_train:     scgg
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --run_timestamp
+2026-07-03 16:50:30,826 [INFO] scgg_train:     20260530_165229
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     general.name=MERFISH_LUNA_inference
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     general.seed=0
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     general.wandb=disabled
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     +general.wandb_project=scgg
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     dataset.train_data_path='/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229/work/train.csv'
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     dataset.test_data_path='/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229/work/test.csv'
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     dataset.gene_columns_start=0
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     dataset.gene_columns_end=254
+2026-07-03 16:50:30,826 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,826 [INFO] scgg_train:     train.batch_size=6
+2026-07-03 16:50:30,827 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,827 [INFO] scgg_train:     train.n_epochs=1000
+2026-07-03 16:50:30,827 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,827 [INFO] scgg_train:     test.save_dir='/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229/luna_run/test_results'
+2026-07-03 16:50:30,827 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,827 [INFO] scgg_train:     hydra.run.dir='/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229/luna_run'
+2026-07-03 16:50:30,827 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,827 [INFO] scgg_train:     test.checkpoints_parent_dir='/nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_model/20260530_165229/luna_run/checkpoints'
+2026-07-03 16:50:30,827 [INFO] scgg_train:     --override
+2026-07-03 16:50:30,827 [INFO] scgg_train:     test.checkpoints_name_list=['epoch=999.ckpt']
+2026-07-03 16:59:11,663 [INFO] scgg_train: LUNA exited with code 0 after 8.7 min (log: /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229/luna_stdout.log)
+2026-07-03 16:59:11,794 [INFO] scgg_train: [runtime] end   phase: training  (521.0s)  peak_gpu=4486MiB  peak_rss=48208MiB
+2026-07-03 16:59:11,802 [WARNING] scgg_train: No checkpoint found under luna_run/checkpoints/
+2026-07-03 16:59:11,895 [INFO] scgg_train: [runtime] start phase: evaluation
+2026-07-03 16:59:17,338 [INFO] scgg_train:   mouse2_slice109_0                 n= 5180  spr_median=0.4323  spr_mean=0.3667
+2026-07-03 16:59:18,711 [INFO] scgg_train:   mouse2_slice10_0                  n= 1160  spr_median=0.2724  spr_mean=0.2442
+2026-07-03 16:59:22,023 [INFO] scgg_train:   mouse2_slice119_0                 n= 5021  spr_median=0.5453  spr_mean=0.4661
+2026-07-03 16:59:25,658 [INFO] scgg_train:   mouse2_slice129_0                 n= 5155  spr_median=0.4263  spr_mean=0.3289
+2026-07-03 16:59:28,423 [INFO] scgg_train:   mouse2_slice139_0                 n= 4186  spr_median=0.4065  spr_mean=0.3599
+2026-07-03 16:59:31,849 [INFO] scgg_train:   mouse2_slice151_0                 n= 4991  spr_median=0.4638  spr_mean=0.3738
+2026-07-03 16:59:34,890 [INFO] scgg_train:   mouse2_slice160_0                 n= 4529  spr_median=0.4443  spr_mean=0.3632
+2026-07-03 16:59:38,407 [INFO] scgg_train:   mouse2_slice169_0                 n= 5050  spr_median=0.5126  spr_mean=0.4198
+2026-07-03 16:59:41,334 [INFO] scgg_train:   mouse2_slice189_0                 n= 4389  spr_median=0.4542  spr_mean=0.3786
+2026-07-03 16:59:42,439 [INFO] scgg_train:   mouse2_slice1_0                   n= 1706  spr_median=0.3886  spr_mean=0.3473
+2026-07-03 16:59:44,548 [INFO] scgg_train:   mouse2_slice201_0                 n= 3733  spr_median=0.5617  spr_mean=0.4781
+2026-07-03 16:59:47,334 [INFO] scgg_train:   mouse2_slice209_0                 n= 4317  spr_median=0.5081  spr_mean=0.4318
+2026-07-03 16:59:47,927 [INFO] scgg_train:   mouse2_slice20_0                  n=  670  spr_median=0.2930  spr_mean=0.2689
+2026-07-03 16:59:49,904 [INFO] scgg_train:   mouse2_slice219_0                 n= 3560  spr_median=0.5146  spr_mean=0.4228
+2026-07-03 16:59:53,335 [INFO] scgg_train:   mouse2_slice229_0                 n= 5047  spr_median=0.5721  spr_mean=0.4636
+2026-07-03 16:59:55,976 [INFO] scgg_train:   mouse2_slice249_0                 n= 4052  spr_median=0.5841  spr_mean=0.5128
+2026-07-03 16:59:58,144 [INFO] scgg_train:   mouse2_slice261_0                 n= 3564  spr_median=0.4879  spr_mean=0.4142
+2026-07-03 17:00:00,729 [INFO] scgg_train:   mouse2_slice270_0                 n= 4081  spr_median=0.5448  spr_mean=0.4702
+2026-07-03 17:00:03,130 [INFO] scgg_train:   mouse2_slice280_0                 n= 3851  spr_median=0.5117  spr_mean=0.4239
+2026-07-03 17:00:05,936 [INFO] scgg_train:   mouse2_slice289_0                 n= 4360  spr_median=0.5478  spr_mean=0.4553
+2026-07-03 17:00:08,263 [INFO] scgg_train:   mouse2_slice300_0                 n= 3780  spr_median=0.5199  spr_mean=0.4451
+2026-07-03 17:00:10,273 [INFO] scgg_train:   mouse2_slice309_0                 n= 3296  spr_median=0.5259  spr_mean=0.4489
+2026-07-03 17:00:11,957 [INFO] scgg_train:   mouse2_slice319_0                 n= 2800  spr_median=0.5417  spr_mean=0.4670
+2026-07-03 17:00:13,114 [INFO] scgg_train:   mouse2_slice31_0                  n= 2037  spr_median=0.4270  spr_mean=0.3715
+2026-07-03 17:00:14,907 [INFO] scgg_train:   mouse2_slice40_0                  n= 3192  spr_median=0.5075  spr_mean=0.4384
+2026-07-03 17:00:16,546 [INFO] scgg_train:   mouse2_slice50_0                  n= 2905  spr_median=0.4568  spr_mean=0.4014
+2026-07-03 17:00:18,567 [INFO] scgg_train:   mouse2_slice61_0                  n= 3316  spr_median=0.4753  spr_mean=0.4262
+2026-07-03 17:00:21,179 [INFO] scgg_train:   mouse2_slice70_0                  n= 4057  spr_median=0.5023  spr_mean=0.4388
+2026-07-03 17:00:23,661 [INFO] scgg_train:   mouse2_slice79_0                  n= 3870  spr_median=0.4480  spr_mean=0.3818
+2026-07-03 17:00:27,086 [INFO] scgg_train:   mouse2_slice90_0                  n= 4946  spr_median=0.4490  spr_mean=0.3823
+2026-07-03 17:00:30,860 [INFO] scgg_train:   mouse2_slice99_0                  n= 5235  spr_median=0.4876  spr_mean=0.3974
+2026-07-03 17:00:31,475 [INFO] scgg_train: [runtime] end   phase: evaluation  (79.6s)  peak_gpu=1MiB  peak_rss=692MiB
+2026-07-03 17:00:31,480 [INFO] scgg_train: ========================================================================
+2026-07-03 17:00:31,480 [INFO] scgg_train: LUNA (this run) — aggregated metrics across test slices
+2026-07-03 17:00:31,480 [INFO] scgg_train: ========================================================================
+2026-07-03 17:00:31,480 [INFO] scgg_train:   spearman_mean_of_medians (n=31 slices) = 0.4778
+2026-07-03 17:00:31,480 [INFO] scgg_train:   LUNA paper headline                                   = 0.4480
+2026-07-03 17:00:31,480 [INFO] scgg_train:   Delta vs LUNA paper                                  = +2.98 pp
+2026-07-03 17:00:31,547 [INFO] scgg_train: [runtime] start phase: write_artifacts
+2026-07-03 17:00:31,686 [INFO] scgg_train: [runtime] end   phase: write_artifacts  (0.1s)  peak_gpu=1MiB  peak_rss=274MiB
+2026-07-03 17:00:31,690 [INFO] scgg_train: Wrote LUNA training artifacts to /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260530_165229

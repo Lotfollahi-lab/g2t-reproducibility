@@ -1,0 +1,229 @@
+[niche] cellcharter_niche_eval.py 2026-07-03-niche-eval-v7-cn-readout
+[niche] loading TEST expression: /nfs/team361/sb75/DATASETS/silver/cns_luna
+[niche]   sagittal1_test.h5ad: section='sagittal1', 91246 cells (pred index expected 0..91245; _bronze_row_pos available)
+[niche]   sagittal2_test.h5ad: section='sagittal2', 123836 cells (pred index expected 0..123835; _bronze_row_pos available)
+[niche]   sagittal3_test.h5ad: section='sagittal3', 207591 cells (pred index expected 0..207590; _bronze_row_pos available)
+[niche]   spinalcord_test.h5ad: section='spinalcord', 5849 cells (pred index expected 0..5848; _bronze_row_pos available)
+[niche]   well01OB_test.h5ad: section='well01OB', 15791 cells (pred index expected 0..15790; _bronze_row_pos available)
+[niche]   well01brain_test.h5ad: section='well01brain', 29623 cells (pred index expected 0..29622; _bronze_row_pos available)
+[niche]   well03_test.h5ad: section='well03', 36954 cells (pred index expected 0..36953; _bronze_row_pos available)
+[niche]   well04_test.h5ad: section='well04', 44514 cells (pred index expected 0..44513; _bronze_row_pos available)
+[niche]   well05_test.h5ad: section='well05', 46184 cells (pred index expected 0..46183; _bronze_row_pos available)
+[niche]   well06_test.h5ad: section='well06', 58117 cells (pred index expected 0..58116; _bronze_row_pos available)
+[niche]   well07_test.h5ad: section='well07', 45268 cells (pred index expected 0..45267; _bronze_row_pos available)
+[niche]   well08_test.h5ad: section='well08', 48306 cells (pred index expected 0..48305; _bronze_row_pos available)
+[niche]   well09_test.h5ad: section='well09', 50603 cells (pred index expected 0..50602; _bronze_row_pos available)
+[niche]   well10_5_test.h5ad: section='well10_5', 38777 cells (pred index expected 0..38776; _bronze_row_pos available)
+[niche]   well10_test.h5ad: section='well10', 63343 cells (pred index expected 0..63342; _bronze_row_pos available)
+[niche]   well11_test.h5ad: section='well11', 43341 cells (pred index expected 0..43340; _bronze_row_pos available)
+[niche]   well1_5_test.h5ad: section='well1_5', 19870 cells (pred index expected 0..19869; _bronze_row_pos available)
+[niche]   well2_5_test.h5ad: section='well2_5', 29485 cells (pred index expected 0..29484; _bronze_row_pos available)
+[niche] loaded 998698 test cells across 18 sections
+[niche] gt_metadata delimiter auto-detected: ','
+[niche]   luna: 14 file(s), 14 sections, 570176 cells mapped [positional]
+[niche]   g2t: 14 file(s), 14 sections, 570176 cells mapped [positional]
+[niche]   celery: 14 file(s), 14 sections, 570176 cells mapped [obs_name->cell_id]
+[niche] coverage: expr(test)=998698 cells / 18 sections; GT∩expr=998698 cells
+[niche]   luna: 570176 cells / 14 sections
+[niche]   g2t: 570176 cells / 14 sections
+[niche]   celery: 570176 cells / 14 sections
+[niche] 570176 cells matched across all sources, spanning 14 sections: ['well01OB', 'well01brain', 'well03', 'well04', 'well05', 'well06', 'well07', 'well08', 'well09', 'well10', 'well10_5', 'well11', 'well1_5', 'well2_5']
+[niche] GT has 100 unique 'Sub_molecular_tissue_region' regions; resolution sweep K in [50, 75, 100, 150, 200] (niche map uses K=100)
+[niche] shared representation: PCA(50) of the 600-dim latent
+[niche] 'reference': building spatial graph + aggregating (once) ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 175/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 106.064
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference K=50: [CellCharter] NMI=0.4764 ARI=0.2685  [CN] NMI=0.5141 ARI=0.2099
+Epoch 143/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 92.487
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference K=75: [CellCharter] NMI=0.4949 ARI=0.2430  [CN] NMI=0.5224 ARI=0.2145
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 84.021
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference K=100: [CellCharter] NMI=0.5042 ARI=0.2453  [CN] NMI=0.5278 ARI=0.2017
+Epoch 159/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 72.987
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference K=150: [CellCharter] NMI=0.5078 ARI=0.1952  [CN] NMI=0.5244 ARI=0.1778
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 65.075
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference K=200: [CellCharter] NMI=0.5070 ARI=0.1548  [CN] NMI=0.5179 ARI=0.1573
+[niche] 'luna': building spatial graph + aggregating (once) ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 121/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 73.834
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna K=50: [CellCharter] NMI=0.3711 ARI=0.1841  [CN] NMI=0.3222 ARI=0.0911
+Epoch 195/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 58.992
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna K=75: [CellCharter] NMI=0.3798 ARI=0.1610  [CN] NMI=0.3255 ARI=0.0945
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 48.850
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna K=100: [CellCharter] NMI=0.3864 ARI=0.1586  [CN] NMI=0.3214 ARI=0.0900
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 34.816
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna K=150: [CellCharter] NMI=0.3889 ARI=0.1281  [CN] NMI=0.3130 ARI=0.0750
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 24.782
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna K=200: [CellCharter] NMI=0.3893 ARI=0.1158  [CN] NMI=0.3112 ARI=0.0667
+[niche] 'g2t': building spatial graph + aggregating (once) ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 78.758
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t K=50: [CellCharter] NMI=0.3846 ARI=0.2023  [CN] NMI=0.3100 ARI=0.0886
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 63.854
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t K=75: [CellCharter] NMI=0.3884 ARI=0.1769  [CN] NMI=0.3159 ARI=0.1012
+Epoch 191/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 54.304
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t K=100: [CellCharter] NMI=0.3918 ARI=0.1510  [CN] NMI=0.3155 ARI=0.0863
+Epoch 173/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 38.720
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t K=150: [CellCharter] NMI=0.3892 ARI=0.1285  [CN] NMI=0.3119 ARI=0.0740
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 28.460
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t K=200: [CellCharter] NMI=0.3926 ARI=0.1065  [CN] NMI=0.3075 ARI=0.0623
+[niche] 'celery': building spatial graph + aggregating (once) ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 135.756
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery K=50: [CellCharter] NMI=0.3649 ARI=0.1317  [CN] NMI=0.2038 ARI=0.0450
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 125.176
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery K=75: [CellCharter] NMI=0.3848 ARI=0.1547  [CN] NMI=0.2065 ARI=0.0527
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 114.915
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery K=100: [CellCharter] NMI=0.3817 ARI=0.1238  [CN] NMI=0.2079 ARI=0.0454
+Epoch 1/199 ━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 131.915
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 101.926
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery K=150: [CellCharter] NMI=0.3856 ARI=0.1025  [CN] NMI=0.2044 ARI=0.0378
+Epoch 1/199 ━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 125.130
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 93.828
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery K=200: [CellCharter] NMI=0.3879 ARI=0.0934  [CN] NMI=0.2056 ARI=0.0324
+[niche] 'shuffled': building spatial graph + aggregating (once) ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 145.322
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   shuffled K=50: [CellCharter] NMI=0.4147 ARI=0.1750  [CN] NMI=0.1725 ARI=0.0322
+Epoch 175/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 137.166
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   shuffled K=75: [CellCharter] NMI=0.4177 ARI=0.1637  [CN] NMI=0.1649 ARI=0.0281
+Epoch 171/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 131.313
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   shuffled K=100: [CellCharter] NMI=0.4173 ARI=0.1524  [CN] NMI=0.1642 ARI=0.0279
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 124.022
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   shuffled K=150: [CellCharter] NMI=0.4134 ARI=0.1139  [CN] NMI=0.1635 ARI=0.0198
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 119.122
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   shuffled K=200: [CellCharter] NMI=0.4103 ARI=0.1039  [CN] NMI=0.1615 ARI=0.0179
+
+[CellCharter]
+   source  resolution  n_cells      NMI      ARI
+reference          50   570176 0.476395 0.268487
+reference          75   570176 0.494897 0.243014
+reference         100   570176 0.504241 0.245285
+reference         150   570176 0.507769 0.195188
+reference         200   570176 0.507006 0.154753
+     luna          50   570176 0.371147 0.184056
+     luna          75   570176 0.379840 0.160953
+     luna         100   570176 0.386405 0.158557
+     luna         150   570176 0.388918 0.128081
+     luna         200   570176 0.389342 0.115766
+      g2t          50   570176 0.384571 0.202308
+      g2t          75   570176 0.388433 0.176919
+      g2t         100   570176 0.391825 0.150961
+      g2t         150   570176 0.389185 0.128521
+      g2t         200   570176 0.392603 0.106548
+   celery          50   570176 0.364943 0.131746
+   celery          75   570176 0.384813 0.154696
+   celery         100   570176 0.381732 0.123847
+   celery         150   570176 0.385596 0.102467
+   celery         200   570176 0.387870 0.093421
+ shuffled          50   570176 0.414672 0.174983
+ shuffled          75   570176 0.417734 0.163738
+ shuffled         100   570176 0.417289 0.152393
+ shuffled         150   570176 0.413400 0.113940
+ shuffled         200   570176 0.410258 0.103916
+
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_eval_metrics.csv and /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_labels.csv
+
+[CN: neighbour cell-type composition]
+   source  resolution  n_cells      NMI      ARI
+reference          50   570176 0.514096 0.209889
+reference          75   570176 0.522354 0.214547
+reference         100   570176 0.527839 0.201685
+reference         150   570176 0.524367 0.177765
+reference         200   570176 0.517944 0.157321
+     luna          50   570176 0.322244 0.091053
+     luna          75   570176 0.325486 0.094542
+     luna         100   570176 0.321400 0.089981
+     luna         150   570176 0.312954 0.075046
+     luna         200   570176 0.311153 0.066714
+      g2t          50   570176 0.310016 0.088625
+      g2t          75   570176 0.315889 0.101212
+      g2t         100   570176 0.315494 0.086319
+      g2t         150   570176 0.311874 0.074045
+      g2t         200   570176 0.307466 0.062319
+   celery          50   570176 0.203811 0.044964
+   celery          75   570176 0.206534 0.052660
+   celery         100   570176 0.207924 0.045440
+   celery         150   570176 0.204422 0.037801
+   celery         200   570176 0.205617 0.032353
+ shuffled          50   570176 0.172535 0.032232
+ shuffled          75   570176 0.164927 0.028149
+ shuffled         100   570176 0.164170 0.027898
+ shuffled         150   570176 0.163529 0.019827
+ shuffled         200   570176 0.161490 0.017873
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_eval_cn_metrics.csv
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_eval_resolution.png and .pdf
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_eval_cn_resolution.png and .pdf
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep/niche_maps.png (section well10)
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@farm-gpu0507>
+Subject: Job 64986: <ccniche_ressweep> in cluster <tiger22> Done
+
+Job <ccniche_ressweep> was submitted from host <tiger22-head1> by user <sb75> in cluster <tiger22> at Fri Jul  3 14:45:41 2026
+Job was executed on host(s) <8*farm-gpu0507>, in queue <training-parallel>, as user <sb75> in cluster <tiger22> at Fri Jul  3 14:45:41 2026
+</nfs/users/nfs_s/sb75> was used as the home directory.
+</nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval> was used as the working directory.
+Started at Fri Jul  3 14:45:41 2026
+Terminated at Fri Jul  3 16:06:47 2026
+Results reported at Fri Jul  3 16:06:47 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+bash -lc "source /nfs/team361/sb75/.venvs/cellcharter/bin/activate && python /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/cellcharter_niche_eval.py   --expr_h5ad '/nfs/team361/sb75/DATASETS/silver/cns_luna'   --coords_luna '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/luna_inference/20260601_085512' --coords_g2t '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/scgg_inference/20260602_142505' --coords_celery '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/celery_inference/20260604_141952'   --gt_metadata '/nfs/team361/sb75/DATASETS/bronze/cns_luna_raw/metadata.csv' --gt_col 'Sub_molecular_tissue_region' --gt_id_col 'NAME'   --expr_id_col 'cell_id' --controls   --resolution_factors '0.5,0.75,1.0,1.5,2.0'   --n_latent 50 --n_layers 3 --seed 0 --out '/nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/resolution_sweep'"
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   84147.55 sec.
+    Max Memory :                                 11053 MB
+    Average Memory :                             9067.23 MB
+    Total Requested Memory :                     256000.00 MB
+    Delta Memory :                               244947.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                263
+    Run time :                                   4862 sec.
+    Turnaround time :                            4866 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file </nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/lsf_logs/ccniche_ressweep.64986.err> for stderr output of this job.
+

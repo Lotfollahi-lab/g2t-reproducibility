@@ -1,0 +1,109 @@
+[niche] cellcharter_niche_eval.py 2026-07-03-niche-eval-v4-obsname-map
+[niche] loading TEST expression: /nfs/team361/sb75/DATASETS/silver/cns_luna
+[niche]   sagittal1_test.h5ad: section='sagittal1', 91246 cells (pred index expected 0..91245; _bronze_row_pos available)
+[niche]   sagittal2_test.h5ad: section='sagittal2', 123836 cells (pred index expected 0..123835; _bronze_row_pos available)
+[niche]   sagittal3_test.h5ad: section='sagittal3', 207591 cells (pred index expected 0..207590; _bronze_row_pos available)
+[niche]   spinalcord_test.h5ad: section='spinalcord', 5849 cells (pred index expected 0..5848; _bronze_row_pos available)
+[niche]   well01OB_test.h5ad: section='well01OB', 15791 cells (pred index expected 0..15790; _bronze_row_pos available)
+[niche]   well01brain_test.h5ad: section='well01brain', 29623 cells (pred index expected 0..29622; _bronze_row_pos available)
+[niche]   well03_test.h5ad: section='well03', 36954 cells (pred index expected 0..36953; _bronze_row_pos available)
+[niche]   well04_test.h5ad: section='well04', 44514 cells (pred index expected 0..44513; _bronze_row_pos available)
+[niche]   well05_test.h5ad: section='well05', 46184 cells (pred index expected 0..46183; _bronze_row_pos available)
+[niche]   well06_test.h5ad: section='well06', 58117 cells (pred index expected 0..58116; _bronze_row_pos available)
+[niche]   well07_test.h5ad: section='well07', 45268 cells (pred index expected 0..45267; _bronze_row_pos available)
+[niche]   well08_test.h5ad: section='well08', 48306 cells (pred index expected 0..48305; _bronze_row_pos available)
+[niche]   well09_test.h5ad: section='well09', 50603 cells (pred index expected 0..50602; _bronze_row_pos available)
+[niche]   well10_5_test.h5ad: section='well10_5', 38777 cells (pred index expected 0..38776; _bronze_row_pos available)
+[niche]   well10_test.h5ad: section='well10', 63343 cells (pred index expected 0..63342; _bronze_row_pos available)
+[niche]   well11_test.h5ad: section='well11', 43341 cells (pred index expected 0..43340; _bronze_row_pos available)
+[niche]   well1_5_test.h5ad: section='well1_5', 19870 cells (pred index expected 0..19869; _bronze_row_pos available)
+[niche]   well2_5_test.h5ad: section='well2_5', 29485 cells (pred index expected 0..29484; _bronze_row_pos available)
+[niche] loaded 998698 test cells across 18 sections
+[niche] gt_metadata delimiter auto-detected: ','
+[niche]   luna: 14 file(s), 14 sections, 570176 cells mapped [positional]
+[niche]   g2t: 14 file(s), 14 sections, 570176 cells mapped [positional]
+[niche]   celery: 14 file(s), 14 sections, 570176 cells mapped [obs_name->cell_id]
+[niche] coverage: expr(test)=998698 cells / 18 sections; GT∩expr=998698 cells
+[niche]   luna: 570176 cells / 14 sections
+[niche]   g2t: 570176 cells / 14 sections
+[niche]   celery: 570176 cells / 14 sections
+[niche] 570176 cells matched across all sources, spanning 14 sections: ['well01OB', 'well01brain', 'well03', 'well04', 'well05', 'well06', 'well07', 'well08', 'well09', 'well10', 'well10_5', 'well11', 'well1_5', 'well2_5']
+[niche] K=100 (GT has 100 unique 'Sub_molecular_tissue_region' regions)
+[niche] shared representation: PCA(50) of the 600-dim latent
+[niche] CellCharter on 'reference' coords ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 84.569
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   reference: NMI=0.5035  ARI=0.2463
+[niche] CellCharter on 'luna' coords ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 133/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 94.521
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   luna: NMI=0.4115  ARI=0.1679
+[niche] CellCharter on 'g2t' coords ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 177/199 ━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 77.620
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   g2t: NMI=0.3818  ARI=0.1434
+[niche] CellCharter on 'celery' coords ...
+[34mINFO    [0m Creating graph using `generic` coordinates and `[3;35mNone[0m` transform and    
+         `[1;36m14[0m` libraries.                                                        
+Epoch 199/199 ━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s nll: 117.331
+Predicting ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/1 0:00:00 • 0:00:00 0.00it/s 
+[niche]   celery: NMI=0.3810  ARI=0.1382
+
+   source  n_cells  n_clusters      NMI      ARI
+reference   570176         100 0.503499 0.246252
+     luna   570176         100 0.411546 0.167940
+      g2t   570176         100 0.381848 0.143379
+   celery   570176         100 0.380975 0.138201
+
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/seed4/niche_eval_metrics.csv and /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/seed4/niche_labels.csv
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/seed4/niche_eval_metrics.png and .pdf
+[niche] wrote /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/seed4/niche_maps.png (section well10)
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@farm-gpu0509>
+Subject: Job 64409: <ccniche_s4> in cluster <tiger22> Done
+
+Job <ccniche_s4> was submitted from host <tiger22-head2> by user <sb75> in cluster <tiger22> at Fri Jul  3 01:05:21 2026
+Job was executed on host(s) <8*farm-gpu0509>, in queue <training-parallel>, as user <sb75> in cluster <tiger22> at Fri Jul  3 01:05:25 2026
+</nfs/users/nfs_s/sb75> was used as the home directory.
+</nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval> was used as the working directory.
+Started at Fri Jul  3 01:05:25 2026
+Terminated at Fri Jul  3 01:20:36 2026
+Results reported at Fri Jul  3 01:20:36 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+bash -lc "source /nfs/team361/sb75/.venvs/cellcharter/bin/activate && python /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/cellcharter_niche_eval.py     --expr_h5ad '/nfs/team361/sb75/DATASETS/silver/cns_luna'     --coords_luna '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/luna_inference/20260601_085547' --coords_g2t '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/scgg_inference/20260602_142522' --coords_celery '/nfs/team361/sb75/scgg-reproducibility/artifacts/cns_luna/celery_inference/20260604_142006'     --gt_metadata '/nfs/team361/sb75/DATASETS/bronze/cns_luna_raw/metadata.csv' --gt_col 'Sub_molecular_tissue_region' --gt_id_col 'NAME'     --expr_id_col 'cell_id'     --n_latent 50 --n_layers 3 --n_clusters 0     --seed 4 --out '/nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/niche_eval_out/seed4'"
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   911.08 sec.
+    Max Memory :                                 7660 MB
+    Average Memory :                             6946.90 MB
+    Total Requested Memory :                     256000.00 MB
+    Delta Memory :                               248340.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                200
+    Run time :                                   911 sec.
+    Turnaround time :                            915 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file </nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/niche_eval/lsf_logs/ccniche_s4.64409.err> for stderr output of this job.
+

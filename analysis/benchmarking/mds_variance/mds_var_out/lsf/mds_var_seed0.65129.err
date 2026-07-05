@@ -1,0 +1,82 @@
+2026-07-03 16:43:48,071 [INFO] scgg_train: Run timestamp: 20260602_142505
+2026-07-03 16:43:48,071 [INFO] scgg_train: Output dir:    /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260602_142505
+2026-07-03 16:43:48,248 [INFO] scgg_train: [runtime] start phase: csv_build
+2026-07-03 16:43:48,264 [INFO] scgg_train: Silver dir: /nfs/team361/sb75/DATASETS/silver/mmc_luna (33 *_train.h5ad, 31 *_test.h5ad)
+2026-07-03 16:43:48,265 [INFO] scgg_train: Writing train CSV -> /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260602_142505/work/train.csv
+2026-07-03 16:44:00,929 [INFO] scgg_train:     collected  6,731 cells from mouse1_slice102
+2026-07-03 16:44:01,052 [INFO] scgg_train:     collected  2,423 cells from mouse1_slice10
+2026-07-03 16:44:01,231 [INFO] scgg_train:     collected  4,994 cells from mouse1_slice112
+2026-07-03 16:44:01,413 [INFO] scgg_train:     collected  6,131 cells from mouse1_slice122
+2026-07-03 16:44:01,593 [INFO] scgg_train:     collected  5,047 cells from mouse1_slice131
+2026-07-03 16:44:01,804 [INFO] scgg_train:     collected  7,409 cells from mouse1_slice153
+2026-07-03 16:44:02,040 [INFO] scgg_train:     collected  6,759 cells from mouse1_slice162
+2026-07-03 16:44:02,250 [INFO] scgg_train:     collected  6,319 cells from mouse1_slice170
+2026-07-03 16:44:02,457 [INFO] scgg_train:     collected  5,780 cells from mouse1_slice180
+2026-07-03 16:44:02,734 [INFO] scgg_train:     collected  5,649 cells from mouse1_slice190
+2026-07-03 16:44:02,875 [INFO] scgg_train:     collected  2,378 cells from mouse1_slice1
+2026-07-03 16:44:03,005 [INFO] scgg_train:     collected  2,197 cells from mouse1_slice200
+2026-07-03 16:44:03,168 [INFO] scgg_train:     collected  6,090 cells from mouse1_slice201
+2026-07-03 16:44:03,323 [INFO] scgg_train:     collected  6,469 cells from mouse1_slice212
+2026-07-03 16:44:03,447 [INFO] scgg_train:     collected  2,033 cells from mouse1_slice21
+2026-07-03 16:44:03,633 [INFO] scgg_train:     collected  5,566 cells from mouse1_slice221
+2026-07-03 16:44:03,820 [INFO] scgg_train:     collected  5,269 cells from mouse1_slice232
+2026-07-03 16:44:03,937 [INFO] scgg_train:     collected  3,931 cells from mouse1_slice241
+2026-07-03 16:44:04,113 [INFO] scgg_train:     collected  4,205 cells from mouse1_slice251
+2026-07-03 16:44:04,280 [INFO] scgg_train:     collected  5,113 cells from mouse1_slice260
+2026-07-03 16:44:04,395 [INFO] scgg_train:     collected  3,883 cells from mouse1_slice271
+2026-07-03 16:44:04,547 [INFO] scgg_train:     collected  4,274 cells from mouse1_slice283
+2026-07-03 16:44:04,715 [INFO] scgg_train:     collected  4,393 cells from mouse1_slice291
+2026-07-03 16:44:04,831 [INFO] scgg_train:     collected  4,344 cells from mouse1_slice301
+2026-07-03 16:44:04,986 [INFO] scgg_train:     collected  3,849 cells from mouse1_slice313
+2026-07-03 16:44:05,108 [INFO] scgg_train:     collected  3,106 cells from mouse1_slice31
+2026-07-03 16:44:05,322 [INFO] scgg_train:     collected  4,059 cells from mouse1_slice326
+2026-07-03 16:44:05,443 [INFO] scgg_train:     collected  4,159 cells from mouse1_slice40
+2026-07-03 16:44:05,605 [INFO] scgg_train:     collected  4,359 cells from mouse1_slice50
+2026-07-03 16:44:05,767 [INFO] scgg_train:     collected  4,791 cells from mouse1_slice62
+2026-07-03 16:44:05,933 [INFO] scgg_train:     collected  5,747 cells from mouse1_slice71
+2026-07-03 16:44:06,123 [INFO] scgg_train:     collected  5,261 cells from mouse1_slice81
+2026-07-03 16:44:06,252 [INFO] scgg_train:     collected  5,661 cells from mouse1_slice91
+2026-07-03 16:44:44,629 [INFO] scgg_train:   wrote 158,379 cells total to /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260602_142505/work/train.csv (bronze-row-pos sorted)
+2026-07-03 16:44:44,640 [INFO] scgg_train:   train: 158,379 rows, 254 feature-cols, 33 sections
+2026-07-03 16:44:44,640 [INFO] scgg_train: Writing test CSV  -> /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260602_142505/work/test.csv
+2026-07-03 16:44:44,813 [INFO] scgg_train:     collected  5,180 cells from mouse2_slice109
+2026-07-03 16:44:44,852 [INFO] scgg_train:     collected  1,160 cells from mouse2_slice10
+2026-07-03 16:44:45,019 [INFO] scgg_train:     collected  5,021 cells from mouse2_slice119
+2026-07-03 16:44:45,146 [INFO] scgg_train:     collected  5,155 cells from mouse2_slice129
+2026-07-03 16:44:45,251 [INFO] scgg_train:     collected  4,186 cells from mouse2_slice139
+2026-07-03 16:44:45,414 [INFO] scgg_train:     collected  4,991 cells from mouse2_slice151
+2026-07-03 16:44:45,597 [INFO] scgg_train:     collected  4,529 cells from mouse2_slice160
+2026-07-03 16:44:45,761 [INFO] scgg_train:     collected  5,050 cells from mouse2_slice169
+2026-07-03 16:44:45,944 [INFO] scgg_train:     collected  4,389 cells from mouse2_slice189
+2026-07-03 16:44:45,997 [INFO] scgg_train:     collected  1,706 cells from mouse2_slice1
+2026-07-03 16:44:46,165 [INFO] scgg_train:     collected  3,733 cells from mouse2_slice201
+2026-07-03 16:44:46,330 [INFO] scgg_train:     collected  4,317 cells from mouse2_slice209
+2026-07-03 16:44:46,358 [INFO] scgg_train:     collected    670 cells from mouse2_slice20
+2026-07-03 16:44:46,548 [INFO] scgg_train:     collected  3,560 cells from mouse2_slice219
+2026-07-03 16:44:46,803 [INFO] scgg_train:     collected  5,047 cells from mouse2_slice229
+2026-07-03 16:44:46,971 [INFO] scgg_train:     collected  4,052 cells from mouse2_slice249
+2026-07-03 16:44:47,077 [INFO] scgg_train:     collected  3,564 cells from mouse2_slice261
+2026-07-03 16:44:47,231 [INFO] scgg_train:     collected  4,081 cells from mouse2_slice270
+2026-07-03 16:44:47,396 [INFO] scgg_train:     collected  3,851 cells from mouse2_slice280
+2026-07-03 16:44:47,554 [INFO] scgg_train:     collected  4,360 cells from mouse2_slice289
+2026-07-03 16:44:47,720 [INFO] scgg_train:     collected  3,780 cells from mouse2_slice300
+2026-07-03 16:44:47,863 [INFO] scgg_train:     collected  3,296 cells from mouse2_slice309
+2026-07-03 16:44:47,994 [INFO] scgg_train:     collected  2,800 cells from mouse2_slice319
+2026-07-03 16:44:48,125 [INFO] scgg_train:     collected  2,037 cells from mouse2_slice31
+2026-07-03 16:44:48,281 [INFO] scgg_train:     collected  3,192 cells from mouse2_slice40
+2026-07-03 16:44:48,437 [INFO] scgg_train:     collected  2,905 cells from mouse2_slice50
+2026-07-03 16:44:48,600 [INFO] scgg_train:     collected  3,316 cells from mouse2_slice61
+2026-07-03 16:44:48,779 [INFO] scgg_train:     collected  4,057 cells from mouse2_slice70
+2026-07-03 16:44:48,948 [INFO] scgg_train:     collected  3,870 cells from mouse2_slice79
+2026-07-03 16:44:49,138 [INFO] scgg_train:     collected  4,946 cells from mouse2_slice90
+2026-07-03 16:44:49,344 [INFO] scgg_train:     collected  5,235 cells from mouse2_slice99
+2026-07-03 16:45:17,428 [INFO] scgg_train:   wrote 118,036 cells total to /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_inference/20260602_142505/work/test.csv (bronze-row-pos sorted)
+2026-07-03 16:45:17,436 [INFO] scgg_train:   test : 118,036 rows, 254 feature-cols, 31 sections
+2026-07-03 16:45:17,502 [INFO] scgg_train: [runtime] end   phase: csv_build  (89.3s)  peak_gpu=107960MiB  peak_rss=1208MiB
+2026-07-03 16:45:17,513 [ERROR] scgg_train: LUNA inference failed
+Traceback (most recent call last):
+  File "/nfs/team361/sb75/scgg/scripts/run_scgg_inference.py", line 139, in main
+    run_scgg_train.run_benchmark(
+  File "/nfs/team361/sb75/scgg/scripts/run_scgg_train.py", line 2026, in run_benchmark
+    raise FileNotFoundError(f"--load_checkpoint not found: {ckpt_path}")
+FileNotFoundError: --load_checkpoint not found: /nfs/team361/sb75/scgg-reproducibility/artifacts/mmc_luna/scgg_model/20260602_142505/best_model.ckpt
