@@ -55,6 +55,17 @@ EXTENDED=(
   "K4|model.edm.embed_dim=4"
   "K32|model.edm.embed_dim=32"
   "mds_eigh|model.edm.mds_solver=eigh"         # exact MDS vs LOBPCG (accuracy parity / runtime check)
+  # *** Reviewer-requested control: CONVENTIONAL coordinate regression.
+  # Distinct from edm_off. edm_off predicts 2-D coordinates but still trains
+  # through the invariant pairwise-distance loss, so it isolates the
+  # overcomplete EDM parameterisation while holding the objective fixed.
+  # THIS row instead swaps the objective itself for the plain coordinate-space
+  # x0 MSE (no centring/alignment/rescaling), i.e. the textbook flow-matching
+  # coordinate loss, which is frame-DEPENDENT. Together the two rows separate
+  # "does the EDM parameterisation help?" from "does the invariant objective
+  # help?" — they answer different questions and neither substitutes for the
+  # other.
+  "coord_raw|model.edm.enabled=false model.loss.pairwise_distance_mse.enabled=false model.loss.coord_mse_raw.enabled=true"
 )
 
 ABLATION_SET="${ABLATION_SET:-core}"
@@ -91,7 +102,7 @@ if [[ -n "$ONLY" ]]; then
   done
   if [[ ${#filtered[@]} -eq 0 ]]; then
     echo "ERROR: ONLY='$ONLY' matched no known ablation. Valid names:" >&2
-    echo "       baseline edm_off diffusion heads16 K2 K16 (core); K4 K32 mds_eigh (extended)." >&2
+    echo "       baseline edm_off diffusion heads16 K2 K16 (core); K4 K32 mds_eigh coord_raw (extended)." >&2
     exit 1
   fi
   entries=( "${filtered[@]}" )
