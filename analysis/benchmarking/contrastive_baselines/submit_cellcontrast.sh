@@ -28,7 +28,8 @@
 #   --data_dir DIR        override the silver dir
 #   --repo DIR            CellContrast checkout  (default $CELLCONTRAST_REPO or
 #                         /nfs/team361/sb75/CellContrast)
-#   --env NAME            conda env             (default cellcontrast)
+#   --venv DIR            uv venv                (default
+#                         /nfs/team361/sb75/.venvs/cellcontrast)
 #   --epochs N            override training_epoch. OMIT to use the authors'
 #                         default (3000) — that is the defensible choice for a
 #                         baseline. 1000 is ~3x faster and the paper says >1000
@@ -50,8 +51,11 @@ RUNNER="$HERE/run_cellcontrast.py"
 DATASET=""
 SEEDS="0 1 2 3 4"
 DATA_DIR=""
-REPO="${CELLCONTRAST_REPO:-/nfs/team361/sb75/CellContrast}"
-CONDA_ENV="${CONDA_ENV:-cellcontrast}"
+# Defaults match setup_cellcontrast_env.sh: the authors' code is cloned next to
+# the other benchmarking assets, and the env is a uv venv (this cluster has no
+# conda on PATH).
+REPO="${CELLCONTRAST_REPO:-$HERE/../CellContrast}"
+VENV_DIR="${VENV_DIR:-/nfs/team361/sb75/.venvs/cellcontrast}"
 EPOCHS=""
 USE_OBSM=""
 MAX_TRAIN_CELLS=""
@@ -72,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     --seeds)            SEEDS="${2:?}"; shift 2 ;;
     --data_dir)         DATA_DIR="${2:?}"; shift 2 ;;
     --repo)             REPO="${2:?}"; shift 2 ;;
-    --env)              CONDA_ENV="${2:?}"; shift 2 ;;
+    --venv)             VENV_DIR="${2:?}"; shift 2 ;;
     --epochs)           EPOCHS="${2:?}"; shift 2 ;;
     --use_obsm)         USE_OBSM="${2:?}"; shift 2 ;;
     --max_train_cells)  MAX_TRAIN_CELLS="${2:?}"; shift 2 ;;
@@ -98,6 +102,9 @@ esac
 [[ -f "$RUNNER" ]] || { echo "ERROR: runner missing: $RUNNER" >&2; exit 1; }
 [[ -f "$REPO/cellContrast.py" ]] || {
   echo "ERROR: CellContrast not found at $REPO (expected cellContrast.py)." >&2
+  echo "       Run: bash $HERE/../setup_cellcontrast_env.sh" >&2; exit 1; }
+[[ -f "$VENV_DIR/bin/activate" ]] || {
+  echo "ERROR: uv venv not found at $VENV_DIR" >&2
   echo "       Run: bash $HERE/../setup_cellcontrast_env.sh" >&2; exit 1; }
 [[ -n "$DATA_DIR" ]] || DATA_DIR="/nfs/team361/sb75/DATASETS/silver/$DATASET"
 [[ -d "$DATA_DIR" ]] || { echo "ERROR: data dir not found: $DATA_DIR" >&2; exit 1; }
@@ -131,7 +138,7 @@ mkdir -p "$JOBDIR"
 echo "== submit_cellcontrast.sh =="
 echo "dataset : $DATASET   ($DATA_DIR)"
 echo "repo    : $REPO  (commit $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?'))"
-echo "env     : $CONDA_ENV"
+echo "venv    : $VENV_DIR"
 echo "seeds   : $SEEDS"
 echo "epochs  : ${EPOCHS:-<upstream default 3000>}"
 echo "obsm    : ${USE_OBSM:-<gene expression, log2(1+x)>}"
@@ -145,8 +152,7 @@ for SEED in $SEEDS; do
   {
     echo "#!/usr/bin/env bash"
     echo "set -euo pipefail"
-    echo "source \"\$(conda info --base)/etc/profile.d/conda.sh\""
-    printf 'conda activate %q\n' "$CONDA_ENV"
+    printf 'source %q/bin/activate\n' "$VENV_DIR"
     # upstream intersects genes through a Python set; pin the hash seed so the
     # feature column order is reproducible across runs
     echo "export PYTHONHASHSEED=0"
