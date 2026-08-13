@@ -160,10 +160,16 @@ DEFAULT_LUNA_TIMESTAMPS: dict[str, list[str]] = {
 # inference tree (the package is named scgg internally but published
 # as G2T) — accept both so old shell-snippets keep working.
 _METHOD_ALIASES = {
-    "luna":   "LUNA",
-    "g2t":    "G2T",
-    "scgg":   "G2T",
-    "celery": "CeLEry",
+    "luna":         "LUNA",
+    "g2t":          "G2T",
+    "scgg":         "G2T",
+    "celery":       "CeLEry",
+    # Reviewer-requested baseline, run from the authors' released MIT-licensed
+    # code via contrastive_baselines/run_cellcontrast.py (a wrapper, not a
+    # reimplementation). Deliberately NOT in _DEFAULT_METHODS so existing
+    # invocations don't start failing on a missing artifact dir — pass
+    # ``--methods cellcontrast`` (or add it explicitly) to score it.
+    "cellcontrast": "CellContrast",
 }
 _DEFAULT_METHODS = ["luna", "g2t", "celery"]
 
