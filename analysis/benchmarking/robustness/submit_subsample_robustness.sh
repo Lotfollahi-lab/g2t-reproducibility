@@ -44,6 +44,7 @@ RUNS_ROOT="${RUNS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts/robustn
 
 COND_ROOT=""; CHECKPOINT=""; TRAIN_CSV=""; ONLY=""
 SEEDS="0"
+RUN_PREFIX="${RUN_PREFIX:-scgg_mmc_sub}"
 SUBMIT_DELAY="${SUBMIT_DELAY:-2}"
 DRY_RUN="${DRY_RUN:-0}"
 PASSTHRU=()          # --mem/--cores/--wall/--queue/--gpu/... forwarded verbatim
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --seeds)      SEEDS="${2:?}"; shift 2 ;;
     --only)       ONLY="${2:?}"; shift 2 ;;
     --runs_root)  RUNS_ROOT="${2:?}"; shift 2 ;;
+    --run_prefix) RUN_PREFIX="${2:?}"; shift 2 ;;
     --dry_run)    DRY_RUN=1; shift ;;
     -h|--help)    sed -n '2,44p' "$0"; exit 0 ;;
     *)            PASSTHRU+=( "$1" ); shift ;;
@@ -156,23 +158,41 @@ for cond in "${CONDS[@]}"; do
     fi
     [[ "$DRY_RUN" == "1" ]] || mkdir -p "$ROOT"
 
+    # Required by submit_pipeline.sh (:334-335); becomes the LSF job name
+    # (:624) and SCGG_RUN_NAME (:648). Vary it per (condition, seed) so nine
+    # concurrent jobs are distinguishable in bjobs and in the log filenames.
+    # Safe to vary here: conditions are already isolated by SCGG_ARTIFACTS_ROOT
+    # and the scorer rglobs for metadata_pred.csv, so an extra path level from
+    # general.name costs nothing.
     CMD=( bash "$SUBMIT"
           --method scgg
           --skip_training
-          --checkpoint "$CHECKPOINT"
-          --train_csv  "$TRAIN_CSV"
-          --test_csv   "$COND_ROOT/$cond/test.csv"
-          --seed       "$seed"
-          --wandb_mode disabled
-          --override   "dataset.num_workers=0" )
+          --checkpoint      "$CHECKPOINT"
+          --train_csv       "$TRAIN_CSV"
+          --test_csv        "$COND_ROOT/$cond/test.csv"
+          --seed            "$seed"
+          --wandb_run_name  "${RUN_PREFIX}_${cond}_seed${seed}"
+          --wandb_mode      disabled
+          --override        "dataset.num_workers=0" )
     [[ ${#PASSTHRU[@]} -gt 0 ]] && CMD+=( "${PASSTHRU[@]}" )
     [[ "$DRY_RUN" == "1" ]] && CMD+=( --dry_run )
 
     echo "-- $cond seed$seed -> $ROOT"
-    if [[ "$DRY_RUN" == "1" ]]; then
-      echo "   SCGG_ARTIFACTS_ROOT=$ROOT ${CMD[*]}"
-    else
-      SCGG_ARTIFACTS_ROOT="$ROOT" "${CMD[@]}"
+    # Always EXECUTE, and let --dry_run propagate to submit_pipeline.sh, so a
+    # dry run exercises its argument validation rather than only printing our
+    # own command line (which hid a missing --wandb_run_name until submit time).
+    # Do not let `set -e` kill the sweep mutely: submit_pipeline.sh can exit
+    # non-zero with NO output (e.g. its INHERITED_TS grep over the checkpoint
+    # path finds no timestamp), which is impossible to diagnose from silence.
+    rc=0
+    SCGG_ARTIFACTS_ROOT="$ROOT" "${CMD[@]}" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+      echo "ERROR: submit_pipeline.sh exited $rc for $cond seed$seed." >&2
+      echo "       Nothing was recorded in the manifest for it. Re-run this one" >&2
+      echo "       condition with --only $cond after fixing the cause." >&2
+      exit "$rc"
+    fi
+    if [[ "$DRY_RUN" != "1" ]]; then
       echo "$cond,$seed,$ROOT" >> "$MANIFEST"
       sleep "$SUBMIT_DELAY"
     fi
