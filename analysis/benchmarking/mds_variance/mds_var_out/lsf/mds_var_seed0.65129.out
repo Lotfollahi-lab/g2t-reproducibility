@@ -1,0 +1,45 @@
+python: /nfs/team361/sb75/.venvs/scgg/bin/python Python 3.10.12
+SCGG_LOG_MDS_VAR=/nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/mds_variance/mds_var_out/mds_var_cortex_seed0.csv
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@farm-gpu0509>
+Subject: Job 65129: <mds_var_seed0> in cluster <tiger22> Exited
+
+Job <mds_var_seed0> was submitted from host <farm-gpu0404> by user <sb75> in cluster <tiger22> at Fri Jul  3 16:43:35 2026
+Job was executed on host(s) <4*farm-gpu0509>, in queue <training-parallel>, as user <sb75> in cluster <tiger22> at Fri Jul  3 16:43:40 2026
+</nfs/users/nfs_s/sb75> was used as the home directory.
+</nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/mds_variance> was used as the working directory.
+Started at Fri Jul  3 16:43:40 2026
+Terminated at Fri Jul  3 16:45:27 2026
+Results reported at Fri Jul  3 16:45:27 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+bash /nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/mds_variance/mds_var_out/job.b47Lkf.sh
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   95.00 sec.
+    Max Memory :                                 963 MB
+    Average Memory :                             692.75 MB
+    Total Requested Memory :                     128000.00 MB
+    Delta Memory :                               127037.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                135
+    Run time :                                   107 sec.
+    Turnaround time :                            112 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file </nfs/team361/sb75/scgg-reproducibility/analysis/benchmarking/mds_variance/mds_var_out/lsf/mds_var_seed0.65129.err> for stderr output of this job.
+
