@@ -39,8 +39,17 @@ training frame.
 Because each training slice has its own micron frame, we min-max normalise every
 slice's coordinates to [-0.5, 0.5] before training. Predictions therefore come
 back in that shared normalised frame, and we invert them with the TEST slice's
-own scaler so Sum RSSD is computed against original-scale truth (Spearman and
-Contact F1 are rank/threshold based and unaffected).
+own scaler so Sum RSSD is computed against original-scale truth.
+
+The default normalisation is PER-AXIS (matching LUNA/G2T's position_normalize),
+which is NOT a similarity transform. Upstream builds its k=80 spatial-neighbour
+positive graph with a KDTree over these coordinates, so per-axis scaling changes
+which cells are positives: measured on the MMC train split that is ~7% of the
+positive set at the median slice aspect (1.25) and ~14% at the worst (1.59). It
+also shifts the Spearman ranks and the Contact F1 percentile threshold, not Sum
+RSSD alone. Pass isotropic=True to SliceCoordScaler to reproduce the raw-micron
+neighbour ranking exactly; see its docstring for the trade-off against harness
+parity.
 
 Usage (cortex):
     python run_cellcontrast.py \
@@ -340,6 +349,64 @@ def read_predicted_coords(ad_mod, path: Path, n_expected: int) -> np.ndarray:
     return xy
 
 
+def reference_coord_pairs(ad_mod, ref_path: Path) -> set:
+    """The set of (x, y) pairs present in the reference.
+
+    ``inference.map_to_ST`` assigns ``ref_coors[ind[0]]`` -- a VERBATIM copy of
+    one reference cell's obs['x'/'y'] -- so every predicted position must be a
+    member of this set. Read backed: we want two obs columns, not the matrix.
+    """
+    a = ad_mod.read_h5ad(ref_path, backed="r")
+    xs = np.asarray(a.obs["x"], dtype=np.float64)
+    ys = np.asarray(a.obs["y"], dtype=np.float64)
+    return {(round(float(x), 9), round(float(y), 9)) for x, y in zip(xs, ys)}
+
+
+def check_predictions(pred: np.ndarray, ref_pairs: set, label: str,
+                      lo: float = -0.5, hi: float = 0.5) -> int:
+    """Reject predictions that cannot be a top-1 reference copy.
+
+    Both failure modes below are invisible in the metrics -- they produce
+    finite, plausible, merely-poor numbers that read as "weak baseline", which
+    is exactly the conclusion we must not reach by accident.
+
+      * out of frame: predictions are copied from the normalised reference, so
+        anything outside [lo, hi] means the readout is not what we think it is
+        (microns? de-novo MDS output? row indices? similarity scores?).
+      * total collapse: every cell mapped to one position. Downstream this
+        yields NaN contact F1 only by luck; fail here instead.
+
+    The pair-membership check catches an x/y transposition, which the range
+    check cannot -- these slices are nearly square, so a swap stays in range.
+    That matters because Sum RSSD fits a rotation only: a reflection inflates
+    it while the isometry-invariant Spearman and Contact F1 stay healthy. It is
+    a WARNING not a raise, because a float32 round-trip through h5ad would also
+    trip it and that would be a false abort mid-sweep.
+    """
+    eps = 1e-6
+    if pred.min() < lo - eps or pred.max() > hi + eps:
+        raise ValueError(
+            f"{label}: predictions leave the normalised frame [{lo}, {hi}] "
+            f"(min={pred.min():.6g}, max={pred.max():.6g}). Upstream copies "
+            f"reference obs['x'/'y'] verbatim, so this is not a top-1 copy.")
+    pairs = [(round(float(a), 9), round(float(b), 9)) for a, b in pred]
+    uniq = len(set(pairs))
+    if uniq == 1:
+        raise ValueError(
+            f"{label}: all {len(pairs)} predictions collapsed onto a single "
+            f"position. Scoring this would report a degenerate model as a "
+            f"method result.")
+    missing = sum(1 for p in pairs if p not in ref_pairs)
+    if missing:
+        LOG.warning("  %s: %d/%d predicted positions are NOT reference pairs "
+                    "(expected 0 for a verbatim copy; an x/y swap looks like "
+                    "this)", label, missing, len(pairs))
+    if uniq <= 2 or uniq < 0.02 * len(pairs):
+        LOG.warning("  %s: only %d distinct positions for %d cells "
+                    "(near-collapse)", label, uniq, len(pairs))
+    return uniq
+
+
 # ---------------------------------------------------------------------------
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
@@ -401,11 +468,15 @@ def main(argv: Optional[List[str]] = None) -> int:
            "--train_data_path", str(ref_path),
            "--save_folder", str(model_dir),
            "--parameter_file_path", str(params_path)]
-    env_note = os.environ.get("PYTHONHASHSEED")
-    if env_note is None:
-        LOG.warning("PYTHONHASHSEED unset — upstream intersects genes via a Python "
-                    "set, so column order can vary between runs. Export "
-                    "PYTHONHASHSEED=0 for byte-reproducibility.")
+    # An earlier version warned here that upstream orders feature columns via a
+    # Python set, so PYTHONHASHSEED had to be pinned for reproducibility. That
+    # was WRONG, and it misled two independent code audits into reporting a
+    # top-severity bug that does not exist. inference.format_query reindexes
+    # through the ORDERED train_genes list saved in the checkpoint --
+    # `[query_adata.var_names.get_loc(g) for g in train_genes]` -- and uses a
+    # set only for the membership test that triggers sys.exit. Feature column
+    # order is therefore deterministic regardless of hash seed, for both the
+    # query and the reference (format_query is applied to both).
     run_cmd(cmd, cwd=repo, dry=args.dry_run)
 
     # Fail fast here rather than letting every inference call fail confusingly.
@@ -437,6 +508,46 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # ---- inference per test slice ------------------------------------------
     per_slice: List[Dict[str, object]] = []
+    ref_pairs: set = set()
+    manifest: Dict[str, object] = {}
+    if not args.dry_run:
+        ref_pairs = reference_coord_pairs(ad_mod, ref_path)
+        # Write the manifest BEFORE the first slice, not after the last. Slice
+        # artifacts are written inside the loop and are independently
+        # scoreable, so a run that dies partway (wall clock, OOM, upstream
+        # exception) used to leave scoreable CSVs with NO manifest -- and the
+        # scorer's smoke-test filter deliberately KEEPS manifest-less runs, so
+        # a crashed smoke test would be auto-discovered and averaged in as a
+        # real replicate. "status" is flipped to complete at the end.
+        manifest = {
+            "wrapper_version": __version__,
+            "method": "cellcontrast",
+            "upstream": "https://github.com/HKU-BAL/CellContrast (MIT)",
+            "upstream_commit": _git_commit(repo),
+            "dataset": dataset, "seed": args.seed, "timestamp": ts,
+            "n_train_slices": len(train_files), "n_test_slices": len(test_files),
+            "parameters": json.loads(params_path.read_text()),
+            "expression_mode": args.expression_mode,
+            "use_obsm": args.use_obsm,
+            "max_train_cells": args.max_train_cells,
+            "max_ref_cells": args.max_ref_cells,
+            "single_cell_mode": args.single_cell,
+            "smoke_test": args.smoke_test,
+            # Upstream hardcodes torch.manual_seed(0) at module import and
+            # exposes no seed argument, so --seed above reaches nothing in the
+            # training subprocess (it only drives --max_train_cells /
+            # --max_ref_cells subsampling here). Runs differ solely through
+            # unseeded stdlib random.shuffle in loadBatchData. Do NOT describe
+            # these as a seed sweep.
+            "seed_is_effective": bool(args.max_train_cells or args.max_ref_cells),
+            "inference_reference": "training-donor slices (pre-registered; test slice "
+                                   "would leak its coordinate set)",
+            "coordinate_frame": "per-slice min-max [-0.5,0.5]; inverted with the test "
+                                "slice's own scaler",
+            "status": "incomplete",
+            "per_slice": per_slice,
+        }
+        write_run_manifest(out_dir, manifest)
     for i, tf in enumerate(test_files, 1):
         label = section_label_from_filename(tf)
         LOG.info("[%d/%d] %s", i, len(test_files), label)
@@ -453,14 +564,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
 
         pred_norm = read_predicted_coords(ad_mod, recon, n_cells)
+        # Validate BEFORE writing artifacts: a bad readout must not reach the
+        # scorer, where it is indistinguishable from a weak baseline. Also
+        # reports the duplicate rate that top-1 copying necessarily produces
+        # (never jitter it away — that would alter the method).
+        uniq = check_predictions(pred_norm, ref_pairs, label)
         # predictions are in the shared normalised frame -> back to this slice's microns
         pred_orig = SliceCoordScaler().fit(coords_true).inverse_transform(pred_norm)
         write_slice_artifacts(results / label, pred_orig, coords_true, cls)
-
-        # top-1 copying quantises predictions onto reference positions; report the
-        # duplicate rate rather than hiding it (and never jitter it away — that
-        # would alter the method).
-        uniq = len({(round(a, 9), round(b, 9)) for a, b in pred_norm})
         LOG.info("  n=%d  distinct predicted positions=%d (%.1f%%)",
                  n_cells, uniq, 100.0 * uniq / n_cells)
         per_slice.append({"section": label, "n_cells": n_cells,
@@ -474,26 +585,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         LOG.info("dry run complete")
         return 0
 
-    write_run_manifest(out_dir, {
-        "wrapper_version": __version__,
-        "method": "cellcontrast",
-        "upstream": "https://github.com/HKU-BAL/CellContrast (MIT)",
-        "upstream_commit": _git_commit(repo),
-        "dataset": dataset, "seed": args.seed, "timestamp": ts,
-        "n_train_slices": len(train_files), "n_test_slices": len(test_files),
-        "parameters": json.loads(params_path.read_text()),
-        "expression_mode": args.expression_mode,
-        "use_obsm": args.use_obsm,
-        "max_train_cells": args.max_train_cells,
-        "max_ref_cells": args.max_ref_cells,
-        "single_cell_mode": args.single_cell,
-        "smoke_test": args.smoke_test,
-        "inference_reference": "training-donor slices (pre-registered; test slice "
-                               "would leak its coordinate set)",
-        "coordinate_frame": "per-slice min-max [-0.5,0.5]; inverted with the test "
-                            "slice's own scaler",
-        "per_slice": per_slice,
-    })
+    # Same dict, now with every slice recorded; flip status so a partial run is
+    # distinguishable from a finished one without counting directories.
+    manifest["per_slice"] = per_slice
+    manifest["status"] = ("complete" if len(per_slice) == len(test_files)
+                          else f"incomplete ({len(per_slice)}/{len(test_files)} slices)")
+    write_run_manifest(out_dir, manifest)
     LOG.info("\nwrote %d slice(s) to %s", len(per_slice), results)
     LOG.info("next: score with compute_extended_metrics.py --methods cellcontrast")
     return 0

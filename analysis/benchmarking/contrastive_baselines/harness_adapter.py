@@ -79,17 +79,39 @@ class SliceCoordScaler:
     Each slice has its own micron-scale bounding box, so coordinates are only
     comparable across slices after per-slice normalisation. Predictions are
     inverse-transformed back to the slice's own original scale before being
-    written out, because Sum RSSD is computed against original-scale truth
-    (Spearman and Contact F1 are rank/threshold based and unaffected).
+    written out, because Sum RSSD is computed against original-scale truth.
+
+    ``isotropic`` selects HOW the box is normalised. For CellContrast this is
+    not cosmetic: upstream builds its k-nearest-neighbour positive graph with a
+    KDTree over exactly these coordinates (``loadData.checkNeighbors``), so the
+    metric we hand it decides which cells become positives.
+
+      * ``isotropic=False`` (default; matches LUNA/G2T ``position_normalize``,
+        which is per-axis min-max grouped by ``cell_section``): each axis is
+        divided by its OWN span, so a non-square slice is squashed
+        anisotropically and Euclidean neighbour ranking CHANGES. Measured on
+        the MMC train split (median aspect 1.25, max 1.59) this alters ~7% of
+        the k=80 positive set at the median slice and ~14% at the worst.
+      * ``isotropic=True``: both axes are divided by the LARGER span and the
+        box is centred, so aspect is preserved and neighbour ranking is
+        IDENTICAL to raw microns. Prefer this whenever the consumer depends on
+        the metric and not merely on a shared frame.
+
+    Only a similarity transform preserves pairwise-distance ranks, so under
+    ``isotropic=False`` the per-cell Spearman and the Contact F1 percentile
+    threshold are affected too -- not Sum RSSD alone. (An earlier version of
+    this docstring claimed otherwise.)
 
     This mirrors CeLEry's handling, which is the closest analogue among our
     baselines (it too predicts coordinates and must invert the transform).
     """
 
-    def __init__(self, lo: float = -0.5, hi: float = 0.5) -> None:
+    def __init__(self, lo: float = -0.5, hi: float = 0.5,
+                 isotropic: bool = False) -> None:
         if not hi > lo:
             raise ValueError("hi must exceed lo")
         self.lo, self.hi = float(lo), float(hi)
+        self.isotropic = bool(isotropic)
         self.min_: Optional[np.ndarray] = None
         self.span_: Optional[np.ndarray] = None
 
@@ -99,6 +121,16 @@ class SliceCoordScaler:
             raise ValueError(f"coords must be (n, 2); got {c.shape}")
         self.min_ = c.min(axis=0)
         span = c.max(axis=0) - self.min_
+        if self.isotropic:
+            # One common scale for both axes. Re-seat ``min_`` on the corner of
+            # the enlarged square so the narrow axis ends up CENTRED in
+            # [lo, hi] rather than pinned to the low edge; inverse_transform
+            # then inverts exactly, since it only ever uses min_/span_.
+            s = float(span.max())
+            if s <= 0.0:
+                s = 1.0
+            self.min_ = (c.max(axis=0) + self.min_) / 2.0 - s / 2.0
+            span = np.full(2, s, dtype=np.float64)
         # A degenerate axis (all cells share a value) would divide by zero;
         # map it to the midpoint instead of producing inf/nan.
         self.span_ = np.where(span > 0, span, 1.0)

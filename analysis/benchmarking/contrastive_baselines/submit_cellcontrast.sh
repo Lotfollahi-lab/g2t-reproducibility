@@ -60,6 +60,11 @@ EPOCHS=""
 USE_OBSM=""
 MAX_TRAIN_CELLS=""
 MAX_REF_CELLS=""
+# Comma-separated *_test.h5ad basenames to skip. The runner supports this but the
+# submitter never forwarded it, so a CNS run scored all 18 test sections while
+# G2T/LUNA/CeLEry score 14 (sagittal1/2/3 + spinalcord excluded) — a mean over a
+# different population of slices, i.e. not a comparable number.
+EXCLUDE_TEST_FILES="${EXCLUDE_TEST_FILES:-}"
 SMOKE=""
 DRY_RUN=""
 ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
@@ -81,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --use_obsm)         USE_OBSM="${2:?}"; shift 2 ;;
     --max_train_cells)  MAX_TRAIN_CELLS="${2:?}"; shift 2 ;;
     --max_ref_cells)    MAX_REF_CELLS="${2:?}"; shift 2 ;;
+    --exclude_test_files) EXCLUDE_TEST_FILES="${2:?}"; shift 2 ;;
     --smoke_test)       SMOKE=1; shift ;;
     --mem)              MEM_MB="${2:?}"; shift 2 ;;
     --wall)             WALL="${2:?}"; shift 2 ;;
@@ -119,6 +125,21 @@ ERROR: --use_obsm is required for cns_luna.
   not comparable. Find the key with:
     python -c "import anndata; a=anndata.read_h5ad('<a *_test.h5ad>'); print(list(a.obsm.keys()))"
   then pass --use_obsm <that key>.
+EOF
+  exit 2
+fi
+# Same reasoning as --use_obsm: scoring a different set of test sections than the
+# other three methods is not a comparable number, so refuse rather than warn.
+if [[ "$DATASET" == "cns_luna" && -z "$EXCLUDE_TEST_FILES" && -z "$SMOKE" ]]; then
+  cat >&2 <<'EOF'
+ERROR: --exclude_test_files is required for cns_luna.
+  G2T/LUNA/CeLEry score 14 of the 18 CNS test sections (sagittal1/2/3 and
+  spinalcord excluded); scoring all 18 averages over a different population of
+  slices and is not comparable. List the exact basenames used by the other
+  methods (see plots/compute_extended_metrics.py and the scgg/luna submitters),
+  then pass them comma-separated, e.g.
+    --exclude_test_files sagittal1_test.h5ad,sagittal2_test.h5ad,sagittal3_test.h5ad,spinalcord_test.h5ad
+  Verify the basenames against `ls "$DATA_DIR"` before submitting.
 EOF
   exit 2
 fi
@@ -168,6 +189,7 @@ for SEED in $SEEDS; do
     [[ -n "$USE_OBSM" ]]        && printf ' \\\n    --use_obsm %q' "$USE_OBSM"
     [[ -n "$MAX_TRAIN_CELLS" ]] && printf ' \\\n    --max_train_cells %q' "$MAX_TRAIN_CELLS"
     [[ -n "$MAX_REF_CELLS" ]]   && printf ' \\\n    --max_ref_cells %q' "$MAX_REF_CELLS"
+    [[ -n "$EXCLUDE_TEST_FILES" ]] && printf ' \\\n    --exclude_test_files %q' "$EXCLUDE_TEST_FILES"
     [[ -n "$SMOKE" ]]           && printf ' \\\n    --smoke_test'
     echo
   } > "$JOB"
