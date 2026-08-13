@@ -66,6 +66,17 @@ EXTENDED=(
   # help?" — they answer different questions and neither substitutes for the
   # other.
   "coord_raw|model.edm.enabled=false model.loss.pairwise_distance_mse.enabled=false model.loss.coord_mse_raw.enabled=true"
+  # Same objective swap as coord_raw, but with the frame-DEPENDENCE removed:
+  # the target cloud is mapped to its deterministic canonical frame (PCA-rotated,
+  # skew-sign-fixed) before the interpolant is built. See
+  # scgg/src/utils/data/canonicalize.py, whose whole reason for existing is that
+  # coordinate FM "regresses toward ONE specific rotated/reflected copy of the
+  # target". Without this row, coord_raw's collapse is open to the objection that
+  # we handicapped the coordinate baseline by leaving its targets un-gauge-fixed;
+  # this gives conventional coordinate regression its best shot in our codebase.
+  # Augmentation is already off by default (train.augment_rotation=false), so
+  # canonicalisation is the only frame-fixing mechanism in play.
+  "coord_raw_canon|model.edm.enabled=false model.loss.pairwise_distance_mse.enabled=false model.loss.coord_mse_raw.enabled=true model.flow_matching.canonicalize_target=true"
 )
 
 ABLATION_SET="${ABLATION_SET:-core}"
@@ -102,7 +113,7 @@ if [[ -n "$ONLY" ]]; then
   done
   if [[ ${#filtered[@]} -eq 0 ]]; then
     echo "ERROR: ONLY='$ONLY' matched no known ablation. Valid names:" >&2
-    echo "       baseline edm_off diffusion heads16 K2 K16 (core); K4 K32 mds_eigh coord_raw (extended)." >&2
+    echo "       baseline edm_off diffusion heads16 K2 K16 (core); K4 K32 mds_eigh coord_raw coord_raw_canon (extended)." >&2
     exit 1
   fi
   entries=( "${filtered[@]}" )
