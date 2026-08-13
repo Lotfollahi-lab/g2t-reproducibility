@@ -20,6 +20,7 @@ Delta = (G2T - comparator), the improvement %, the paired-t p-value and stars.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import sys
@@ -102,6 +103,32 @@ def stars(p):
     return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
 
 
+def _discover_cellcontrast(root: Path):
+    """Timestamps under a cellcontrast_inference root, excluding smoke tests.
+
+    Returns [] for a missing root so an un-run baseline is a normal state
+    rather than an error.
+    """
+    if not root.exists():
+        return []
+    out = []
+    for p in sorted(root.iterdir()):
+        if not (p.is_dir() and _TS_RE.match(p.name)):
+            continue
+        manifest = p / "run_manifest.json"
+        if manifest.exists():
+            try:
+                if bool(json.loads(manifest.read_text()).get("smoke_test")):
+                    print(f"[bench-stats] skipping smoke-test run {p.name}",
+                          file=sys.stderr)
+                    continue
+            except Exception as exc:
+                print(f"[bench-stats] WARN unreadable {manifest}: {exc}",
+                      file=sys.stderr)
+        out.append(p.name)
+    return out
+
+
 def _discover_luna_timestamps(root: Path):
     if not root.exists():
         raise FileNotFoundError(f"LUNA inference root not found: {root}")
@@ -140,16 +167,27 @@ def main() -> int:
 
     roots = {"G2T": ARTIFACTS_ROOT / ds / "scgg_inference",
              "LUNA": ARTIFACTS_ROOT / ds / "luna_inference",
-             "CeLEry": ARTIFACTS_ROOT / ds / "celery_inference"}
+             "CeLEry": ARTIFACTS_ROOT / ds / "celery_inference",
+             "CellContrast": ARTIFACTS_ROOT / ds / "cellcontrast_inference"}
     ts_scgg = list(_TS["scgg"].get(ds, []))
     ts_luna = list(_TS["luna"].get(ds, [])) or _discover_luna_timestamps(roots["LUNA"])
     ts_cel = list(_TS["celery"].get(ds, []))
     data = {"G2T": load_method(roots["G2T"], ts_scgg),
             "LUNA": load_method(roots["LUNA"], ts_luna),
             "CeLEry": load_method(roots["CeLEry"], ts_cel)}
+    # CellContrast is optional: include it only if runs exist, so this script
+    # keeps working unchanged before the baseline has been run. No pinned seed
+    # set yet, so discover the tree and drop smoke-test runs.
+    ts_cc = _discover_cellcontrast(roots["CellContrast"])
+    if ts_cc:
+        print(f"[bench-stats] CellContrast: {len(ts_cc)} run(s) discovered")
+        data["CellContrast"] = load_method(roots["CellContrast"], ts_cc)
+    else:
+        print("[bench-stats] CellContrast: no runs found — excluded")
 
     ref = args.reference
-    others = [m for m in ("G2T", "LUNA", "CeLEry") if m != ref]
+    others = [m for m in ("G2T", "LUNA", "CeLEry", "CellContrast")
+              if m != ref and m in data]
     shared = sorted(set(data[ref]).intersection(*[set(data[m]) for m in others]))
     print(f"[bench-stats] dataset={ds}: shared seeds across all methods = "
           f"{len(shared)} {shared}")

@@ -44,6 +44,7 @@ which fires it on the ``normal`` queue with 4 GB / 1 core / 10 min.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -135,6 +136,16 @@ DEFAULT_LUNA_TIMESTAMPS: dict[str, list[str]] = {
 # Filename of the per-timestamp aggregated CSV written by
 # compute_extended_metrics.py — single-row schema mirroring the
 # pipeline's metrics.csv convention.
+# CellContrast (reviewer-requested baseline, run from the authors' released
+# code). Empty list = AUTO-DISCOVER the tree, since these runs are new and
+# there is no canonical seed set pinned yet. Once the 5-seed sweep exists,
+# pin the timestamps here exactly as for the other methods so the figure is
+# reproducible rather than dependent on directory contents.
+DEFAULT_CELLCONTRAST_TIMESTAMPS: dict[str, list[str]] = {
+    "mmc_luna": [],
+    "cns_luna": [],
+}
+
 EXTENDED_METRICS_FILENAME = "extended_metrics.csv"
 
 
@@ -213,6 +224,10 @@ METHODS: dict[str, str] = {
     "G2T":    "#D55E00",   # vermillion — proposed method (stands out)
     "LUNA":   "#0072B2",   # blue       — headline diffusion baseline
     "CeLEry": "#009E73",   # bluish green — supervised-MLP baseline
+    # Reviewer-requested contrastive baseline. Reddish purple from the same
+    # Okabe-Ito colourblind-safe palette, distinguishable from the three above
+    # in both deuteranopia and greyscale.
+    "CellContrast": "#CC79A7",
 }
 
 
@@ -232,6 +247,30 @@ ns.apply()
 # ──────────────────────────────────────────────────────────────────────
 
 _TS_RE = re.compile(r"^\d{8}_\d{6}(?:_[A-Za-z0-9]+)?$")
+
+
+def _drop_smoke_test_timestamps(root: Path, timestamps: list[str]) -> list[str]:
+    """Drop runs whose ``run_manifest.json`` says ``smoke_test: true``.
+
+    A smoke test trains a few epochs on 2 slices and scores 1 test slice; on
+    disk it is indistinguishable from a real run, so auto-discovery would
+    silently average it into the figure. Runs without a manifest are kept, so
+    this cannot change behaviour for the pre-existing methods.
+    """
+    kept, dropped = [], []
+    for ts in timestamps:
+        manifest = root / ts / "run_manifest.json"
+        if manifest.exists():
+            try:
+                if bool(json.loads(manifest.read_text()).get("smoke_test")):
+                    dropped.append(ts)
+                    continue
+            except Exception as exc:
+                print(f"[plot_metrics] WARN unreadable {manifest}: {exc}")
+        kept.append(ts)
+    if dropped:
+        print(f"[plot_metrics] skipping {len(dropped)} smoke-test run(s): {dropped}")
+    return kept
 
 
 def _discover_luna_timestamps(root: Path) -> list[str]:
@@ -520,6 +559,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--cellcontrast_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps to load from "
+            "cellcontrast_inference/ for the CellContrast baseline. "
+            "Overrides DEFAULT_CELLCONTRAST_TIMESTAMPS; if both are empty the "
+            "tree is auto-discovered. Runs marked smoke_test in their "
+            "run_manifest.json are always excluded. If no runs exist, "
+            "CellContrast is simply omitted from the figure."
+        ),
+    )
+    p.add_argument(
         "--suffix",
         default="",
         help=(
@@ -535,6 +586,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     return p.parse_args(argv)
+
+
+def _discover_timestamps(root: Path) -> list[str]:
+    """Sorted immediate subdirs of ``root`` matching YYYYMMDD_HHMMSS[_suffix].
+
+    Used only for CellContrast, whose canonical seed set is not pinned yet.
+    Returns [] for a missing root rather than raising, so the caller can treat
+    "baseline not run" as a normal state.
+    """
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.iterdir()
+                  if p.is_dir() and _TS_RE.match(p.name))
 
 
 def _parse_ts_list(s: str | None) -> list[str] | None:
@@ -559,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
     luna_root   = ARTIFACTS_ROOT / dataset / "luna_inference"
     scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
     celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
+    cc_root     = ARTIFACTS_ROOT / dataset / "cellcontrast_inference"
     out_dir     = ARTIFACTS_ROOT / dataset / "comparison_plots"
     print(f"[plot_metrics] dataset = {dataset}")
 
@@ -610,7 +675,24 @@ def main(argv: list[str] | None = None) -> int:
     g2t_df    = _collect("G2T",    scgg_root,   scgg_timestamps,   ext_filename)
     luna_df   = _collect("LUNA",   luna_root,   luna_timestamps,   ext_filename)
     celery_df = _collect("CeLEry", celery_root, celery_timestamps, ext_filename)
-    df = pd.concat([g2t_df, luna_df, celery_df], ignore_index=True)
+    frames = [g2t_df, luna_df, celery_df]
+
+    # CellContrast is OPTIONAL so this script keeps working unchanged when the
+    # baseline has not been run: explicit list, else DEFAULT_*, else discover
+    # the tree; smoke-test runs are always excluded.
+    cc_timestamps = (
+        _parse_ts_list(args.cellcontrast_timestamps)
+        or list(DEFAULT_CELLCONTRAST_TIMESTAMPS.get(dataset, []))
+        or (_discover_timestamps(cc_root) if cc_root.exists() else [])
+    )
+    cc_timestamps = _drop_smoke_test_timestamps(cc_root, cc_timestamps)
+    if cc_timestamps:
+        print(f"[plot_metrics] CellContrast: {len(cc_timestamps)} run(s)")
+        frames.append(_collect("CellContrast", cc_root, cc_timestamps, ext_filename))
+    else:
+        print("[plot_metrics] CellContrast: no runs found — omitted from figure")
+
+    df = pd.concat(frames, ignore_index=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     # Tag the output figure + processed CSV with the same suffix so
@@ -630,7 +712,10 @@ def main(argv: list[str] | None = None) -> int:
     print(summary.to_string(float_format=lambda x: f"{x:.4f}"))
 
     # ── Figure ─────────────────────────────────────────────────────────
-    methods = list(METHODS.keys())
+    # Plot only methods actually present in the data — otherwise an
+    # un-run baseline would render as an empty row with a label.
+    present = set(df["method"].unique())
+    methods = [m for m in METHODS if m in present]
     n_methods = len(methods)
 
     # Per-panel sizes — tightened so multiple comparison figures can

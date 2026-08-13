@@ -61,6 +61,7 @@ scripts pick up the new canonical seed set.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -197,6 +198,35 @@ def _discover_timestamps(root: Path) -> list[str]:
     if not timestamps:
         raise RuntimeError(f"no YYYYMMDD_HHMMSS subdirs under {root}")
     return timestamps
+
+
+def _drop_smoke_test_timestamps(root: Path, timestamps: list[str]) -> list[str]:
+    """Drop runs whose ``run_manifest.json`` says ``smoke_test: true``.
+
+    Smoke tests train for a handful of epochs on 2 slices and score 1 test
+    slice. They exist to prove an install works and their numbers are
+    meaningless, but on disk they are indistinguishable from a real run — same
+    directory layout, same artifact filenames. Auto-discovery would happily
+    pick them up and average them in, which is exactly the kind of error that
+    survives review. Runs without a manifest are kept (all pre-existing
+    methods) so this cannot change historical behaviour.
+    """
+    kept, dropped = [], []
+    for ts in timestamps:
+        manifest = root / ts / "run_manifest.json"
+        if manifest.exists():
+            try:
+                if bool(json.loads(manifest.read_text()).get("smoke_test")):
+                    dropped.append(ts)
+                    continue
+            except Exception as exc:            # unreadable manifest -> keep, warn
+                print(f"[compute_extended] WARN unreadable {manifest}: {exc}",
+                      file=sys.stderr)
+        kept.append(ts)
+    if dropped:
+        print(f"[compute_extended] skipping {len(dropped)} smoke-test run(s): "
+              f"{dropped}")
+    return kept
 
 
 def _find_slice_dirs(ts_root: Path) -> list[Path]:
@@ -548,6 +578,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--cellcontrast_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps under "
+            "<cellcontrast_inference>. If omitted, AUTO-DISCOVERS the tree "
+            "(these runs are new, so there is no DEFAULT_* list). Runs whose "
+            "run_manifest.json marks them smoke_test are always excluded."
+        ),
+    )
+    p.add_argument(
         "--skip_existing",
         action="store_true",
         help=(
@@ -677,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     luna_root   = ARTIFACTS_ROOT / dataset / "luna_inference"
     scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
     celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
+    cellcontrast_root = ARTIFACTS_ROOT / dataset / "cellcontrast_inference"
     print(f"[compute_extended] dataset = {dataset}")
 
     # Build the (method_label, root, timestamps) work list, scoping each
@@ -719,6 +760,24 @@ def main(argv: list[str] | None = None) -> int:
                 f"--celery_timestamps."
             )
         work.append(("CeLEry", celery_root, celery_ts))
+    if "CellContrast" in selected:
+        # Reviewer-requested baseline, produced by
+        # contrastive_baselines/run_cellcontrast.py. No DEFAULT_* list: the
+        # runs are new, so we auto-discover the tree (like LUNA's fallback)
+        # unless an explicit list is given.
+        cc_ts = (
+            _parse_ts_list(args.cellcontrast_timestamps)
+            or _discover_timestamps(cellcontrast_root)
+        )
+        cc_ts = _drop_smoke_test_timestamps(cellcontrast_root, cc_ts)
+        if not cc_ts:
+            raise RuntimeError(
+                f"No CellContrast timestamps for dataset={dataset!r} under "
+                f"{cellcontrast_root} (smoke-test runs are excluded). Run "
+                f"contrastive_baselines/submit_cellcontrast.sh first, or pass "
+                f"--cellcontrast_timestamps."
+            )
+        work.append(("CellContrast", cellcontrast_root, cc_ts))
 
     if not work:
         # Defensive: _parse_methods enforces non-empty, but if the
