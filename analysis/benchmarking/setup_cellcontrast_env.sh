@@ -46,10 +46,21 @@ REPO_DIR="${REPO_DIR:-$HERE/CellContrast}"
 REPO_URL="${REPO_URL:-https://github.com/HKU-BAL/CellContrast.git}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.9}"
 SCANPY_VERSION="${SCANPY_VERSION:-1.9.3}"
+# scanpy 1.9.3 predates NumPy 2 and uses np.float_, which NumPy 2.0 REMOVED.
+# Its metadata does not exclude numpy>=2, so a naive resolve installs numpy 2.x
+# and every `import scanpy` then dies with
+#   AttributeError: `np.float_` was removed in the NumPy 2.0 release.
+# Pin numpy below 2 for this env. (Upstream's own environment.yml predates the
+# problem, so it says nothing about it.)
+NUMPY_SPEC="${NUMPY_SPEC:-numpy<2}"
 # Upstream leaves torch unpinned; choose a CUDA build for the cluster. Set
 # TORCH_SPEC="torch" for a CPU-only install.
 TORCH_SPEC="${TORCH_SPEC:-torch --index-url https://download.pytorch.org/whl/cu121}"
 SKIP_CLONE="${SKIP_CLONE:-0}"
+
+# The uv cache and /nfs are on different filesystems here, so hardlinking is
+# unavailable; say so up front instead of emitting a warning per install.
+export UV_LINK_MODE="${UV_LINK_MODE:-copy}"
 
 log() { printf '[setup_cellcontrast_env] %s\n' "$*"; }
 
@@ -110,18 +121,20 @@ UV_PIP=(uv pip install --python "$VENV_DIR/bin/python")
 
 # ---------------------------------------------------------------------------
 # 3. Dependencies
-#    scanpy first — it brings anndata/numpy/pandas/scipy/scikit-learn/matplotlib,
-#    which covers every import in the upstream package except torch and tqdm.
+#
+#    ORDER MATTERS. torch goes first (from the CUDA index), then scanpy with the
+#    numpy<2 constraint. Installing scanpy last lets its resolve pin numpy for
+#    the env; doing it the other way round leaves torch's looser numpy
+#    requirement free to pull in numpy 2.x, which breaks scanpy 1.9.3.
+#    scanpy also brings anndata/pandas/scipy/scikit-learn/matplotlib, covering
+#    every import the upstream package makes apart from torch and tqdm.
 # ---------------------------------------------------------------------------
-log "installing scanpy==$SCANPY_VERSION ..."
-"${UV_PIP[@]}" "scanpy==$SCANPY_VERSION"
-
 log "installing torch ($TORCH_SPEC) ..."
 # shellcheck disable=SC2086
 "${UV_PIP[@]}" $TORCH_SPEC
 
-log "installing tqdm ..."
-"${UV_PIP[@]}" tqdm
+log "installing scanpy==$SCANPY_VERSION with '$NUMPY_SPEC' and tqdm ..."
+"${UV_PIP[@]}" "scanpy==$SCANPY_VERSION" "$NUMPY_SPEC" tqdm
 
 # ---------------------------------------------------------------------------
 # 4. Verify — every import the upstream package actually makes
@@ -139,6 +152,19 @@ for m in required:
     except Exception as e:
         missing.append(m)
         print(f"  MISS {m:12s} {type(e).__name__}: {e}")
+
+# Guard the specific incompatibility this env is prone to: scanpy 1.9.3 uses
+# np.float_, removed in NumPy 2.0. Catch it here rather than 12 h into a job.
+try:
+    import numpy as _np
+    if int(_np.__version__.split(".")[0]) >= 2:
+        missing.append("numpy<2")
+        print(f"  FAIL numpy {_np.__version__} is >= 2; scanpy 1.9.x needs "
+              f"numpy<2 (np.float_ was removed). Rebuild the venv.")
+    else:
+        print(f"  OK   numpy<2 constraint satisfied ({_np.__version__})")
+except Exception:
+    pass
 
 # scipy.spatial.KDTree is what upstream uses to build spatial positive pairs
 try:
@@ -159,6 +185,25 @@ except Exception:
 
 sys.exit(1 if missing else 0)
 PY
+
+# Import the AUTHORS' own modules — the real proof the env can run their code.
+log "importing upstream modules from $REPO_DIR ..."
+( cd "$REPO_DIR" && "$VENV_DIR/bin/python" - <<'PY'
+import sys, traceback
+bad = []
+for m in ("cellContrast.model", "cellContrast.train",
+          "cellContrast.inference", "cellContrast.loadData",
+          "cellContrast.utils"):
+    try:
+        __import__(m)
+        print(f"  OK   {m}")
+    except Exception as e:
+        bad.append(m)
+        print(f"  FAIL {m}: {type(e).__name__}: {e}")
+        traceback.print_exc(limit=2)
+sys.exit(1 if bad else 0)
+PY
+)
 
 # ---------------------------------------------------------------------------
 log "done."
