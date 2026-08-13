@@ -384,12 +384,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- train once --------------------------------------------------------
     model_dir = work / "model"
     model_dir.mkdir(parents=True, exist_ok=True)
+    # NOTE: we deliberately do NOT pass -sc/--single_cell.
+    #
+    # Upstream train.py contains
+    #     if(args.single_cell):
+    #         args.parameter_file_path = "./parameters/parameters_singleCell.json"
+    # which HARD-OVERWRITES whatever --parameter_file_path we passed with the
+    # repo's own relative path, silently discarding our file (so --epochs and
+    # --smoke_test had no effect and every run did the full 3000 epochs).
+    # Verified against the source that `single_cell` is used for nothing else —
+    # it never appears again after that reassignment — so omitting the flag and
+    # passing our own copy of parameters_singleCell.json is EXACTLY equivalent
+    # while letting our overrides actually apply. ``--single_cell`` on OUR CLI
+    # still selects which upstream file write_parameters() copies.
     cmd = [sys.executable, str(entry), "train",
            "--train_data_path", str(ref_path),
            "--save_folder", str(model_dir),
            "--parameter_file_path", str(params_path)]
-    if args.single_cell:
-        cmd.append("-sc")
     env_note = os.environ.get("PYTHONHASHSEED")
     if env_note is None:
         LOG.warning("PYTHONHASHSEED unset — upstream intersects genes via a Python "
@@ -398,10 +409,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_cmd(cmd, cwd=repo, dry=args.dry_run)
 
     # Fail fast here rather than letting every inference call fail confusingly.
+    # Also verify the epoch count we ASKED for is the one that actually ran:
+    # upstream names checkpoints epoch_<N>.pt, so a mismatch means our parameter
+    # file was ignored (this is exactly how the -sc override above was caught).
     if not args.dry_run:
         ckpt = find_checkpoint(model_dir)
         LOG.info("trained checkpoint: %s (%.1f MB)",
                  ckpt.name, ckpt.stat().st_size / 1e6)
+        # Upstream inference.load_model builds the checkpoint path as
+        #     <model_folder>/epoch_<params['training_epoch']>.pt
+        # so we assert THAT EXACT path exists — the same string inference will
+        # construct. Checking only "some epoch_*.pt exists" is not enough: if
+        # training silently used different parameters than we passed (the -sc
+        # bug above), training writes epoch_3000.pt while inference looks for
+        # epoch_5.pt and dies with a bare FileNotFoundError 50 minutes later.
+        requested = int(json.loads(params_path.read_text())["training_epoch"])
+        expected = model_dir / f"epoch_{requested}.pt"
+        if not expected.exists():
+            raise RuntimeError(
+                f"checkpoint {expected.name} is missing (found {ckpt.name}). "
+                f"Inference derives the filename from training_epoch={requested} "
+                f"in our parameter file, so training must have used DIFFERENT "
+                f"parameters than we passed — the recorded hyperparameters would "
+                f"not describe this model. Do not report this run. "
+                f"(Known cause: passing -sc makes upstream train.py overwrite "
+                f"--parameter_file_path with its own default.)")
 
     # ---- inference per test slice ------------------------------------------
     per_slice: List[Dict[str, object]] = []
