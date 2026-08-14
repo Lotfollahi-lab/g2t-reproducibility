@@ -251,10 +251,37 @@ check(d_ok["distinct_argmax_spots"] > 50,
       str(d_ok["distinct_argmax_spots"]))
 check(set(d_ok) == {"n_spots", "n_cells", "distinct_argmax_spots",
                     "frac_cells_on_spot0", "C_min", "C_max", "C_mean", "C_std",
-                    "col_std_median", "col_std_min", "col_std_rel"},
+                    "col_std_median", "col_std_min", "col_std_rel",
+                    "col_std_min_over_C_std", "col_profile_corr"},
       "diagnostics dict has the documented keys (it goes into the manifest)")
 check(all(isinstance(v, (int, float)) for v in d_ok.values()),
       "all diagnostics are JSON-serialisable scalars")
+
+# The farm signature: a shared spot profile with <1% cell-specific modulation.
+# col_std_rel looks HEALTHY here (~0.2) -- only col_profile_corr catches it.
+_a = np.random.default_rng(0).uniform(3.1e-4, 1.13e-3, size=(500, 1))
+_farm = (_a * (1.0 + 0.003 * np.random.default_rng(1).normal(size=(1, 5180)))
+         ).astype(np.float32)
+d_farm = C.coefficient_diagnostics(_farm)
+check(d_farm["distinct_argmax_spots"] == 1,
+      "farm signature reproduced: 1 distinct spot for 5,180 cells")
+check(d_farm["col_std_rel"] > 0.1,
+      "col_std_rel looks HEALTHY on the farm signature (why it was not enough)",
+      f"{d_farm['col_std_rel']:.3f}")
+check(d_farm["col_profile_corr"] > C.COL_PROFILE_CORR_DEGENERATE,
+      "col_profile_corr DOES flag it", f"{d_farm['col_profile_corr']:.4f}")
+check(d_farm["col_std_min_over_C_std"] > 0.95,
+      "col_std_min/C_std ~1 is the separability tell",
+      f"{d_farm['col_std_min_over_C_std']:.4f}")
+# A genuinely cell-specific matrix must NOT be flagged.
+_healthy = (_a + 3.0 * float(_a.std())
+            * np.random.default_rng(2).normal(size=(500, 5180))).astype(np.float32)
+d_h = C.coefficient_diagnostics(_healthy)
+check(d_h["col_profile_corr"] < C.COL_PROFILE_CORR_DEGENERATE,
+      "a cell-specific matrix is NOT flagged (no false positive)",
+      f"corr={d_h['col_profile_corr']:.4f}, distinct={d_h['distinct_argmax_spots']}")
+check(d_h["distinct_argmax_spots"] > 100,
+      "...and it yields many distinct spots", str(d_h["distinct_argmax_spots"]))
 
 print("\n[5] _patch_contrastive_device — fixes upstream's CUDA crash, changes no maths")
 # Fake the two-device situation with plain Python objects: no torch needed. A

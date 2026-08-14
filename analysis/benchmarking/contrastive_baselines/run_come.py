@@ -528,17 +528,34 @@ def fit_come(come_mods, ref_X, ref_cls, qry_X, qry_cls, args, work: Path,
     return C
 
 
-def coefficient_diagnostics(C: np.ndarray) -> Dict[str, float]:
-    """Measure whether the fitted mapping matrix actually differentiates cells.
+def coefficient_diagnostics(C: np.ndarray, n_probe: int = 256,
+                            seed: int = 0) -> Dict[str, float]:
+    """Measure whether the fitted mapping matrix actually differentiates CELLS.
 
     Exists because "did COME converge?" is otherwise unanswerable from the log
-    until the read-out either works or collapses, and because a collapse has
-    several possible causes we should not have to guess between. The decisive
-    number is ``col_std_median``: ``Coefficient`` starts as a CONSTANT matrix
-    (model.py:48), and for the argmax read-out to carry information each column
-    (one cell, over all spots) must acquire spread. A value at or near 0 means
-    the columns are still effectively constant, so every cell's argmax is
-    decided by the tie-break rather than by the data.
+    until the read-out either works or collapses.
+
+    THE DECISIVE FIELD IS ``col_profile_corr``, and the reason is worth stating:
+    a mapping can have plenty of spread and still be useless. On the first real
+    fit here the matrix measured C_std 1.92e-4 with col_std_rel 0.17 -- healthy
+    looking -- yet every one of 5,180 cells mapped to the SAME spot. The tell was
+    ``col_std_min ~= col_std_median ~= C_std`` (ratio 0.998): every column had the
+    same spread because every column was the same SHARED SPOT PROFILE, scaled.
+    Reproducing that signature required the cell-specific component to be under
+    ~1% of the shared one. In other words COME had learned *which spots
+    reconstruct expression well* (a per-spot property, identical for every cell)
+    rather than *which cell belongs to which spot*.
+
+    A per-column spread test cannot see that, because the shared profile really
+    does vary. What sees it is the mutual correlation of the column profiles:
+    centre and scale each cell's column, then correlate columns pairwise.
+      * ~1.0  -> every cell has the same profile, so argmax is cell-independent
+                 BY CONSTRUCTION and the read-out is meaningless.
+      * ->0   -> cells have acquired their own profiles (validated: the measure
+                 falls 1.00 -> 0.10 as a cell-specific component is added, while
+                 distinct argmax spots rise 1 -> 468).
+    Computed on ``n_probe`` randomly sampled columns so it stays cheap at
+    (20000 x 5235): O(n_spots * n_probe^2).
     """
     idx = np.argmax(C, axis=0)
     col_std = C.std(axis=0)
@@ -551,6 +568,20 @@ def coefficient_diagnostics(C: np.ndarray) -> Dict[str, float]:
     # matrix's own magnitude separates the two regimes by ~5 orders of magnitude:
     # ~3e-6 for a constant matrix vs ~0.3 for a differentiated one.
     col_std_rel = float(np.median(col_std) / scale) if scale > 0 else 0.0
+
+    # Median pairwise correlation of the column (per-cell) profiles.
+    rng = np.random.default_rng(seed)
+    k = int(min(n_probe, C.shape[1]))
+    prof_corr = float("nan")
+    if k >= 2 and C.shape[0] >= 2:
+        cols = rng.choice(C.shape[1], k, replace=False)
+        M = np.asarray(C[:, cols], dtype=np.float64)
+        M = M - M.mean(axis=0, keepdims=True)
+        M = M / (M.std(axis=0, keepdims=True) + 1e-30)
+        R = (M.T @ M) / M.shape[0]
+        iu = np.triu_indices(k, 1)
+        prof_corr = float(np.median(R[iu]))
+
     return {
         "n_spots": int(C.shape[0]),
         "n_cells": int(C.shape[1]),
@@ -563,6 +594,9 @@ def coefficient_diagnostics(C: np.ndarray) -> Dict[str, float]:
         "col_std_median": float(np.median(col_std)),
         "col_std_min": float(col_std.min()),
         "col_std_rel": col_std_rel,
+        "col_std_min_over_C_std": (float(col_std.min() / C.std())
+                                   if float(C.std()) > 0 else 0.0),
+        "col_profile_corr": prof_corr,
     }
 
 
@@ -571,6 +605,13 @@ def coefficient_diagnostics(C: np.ndarray) -> Dict[str, float]:
 # noise floor for a truly constant matrix is ~3e-6 relative, and a converged fit
 # measures ~1e-1, so 1e-4 sits with ~30x margin on both sides.
 COL_STD_REL_DEGENERATE = 1e-4
+
+# Above this median pairwise correlation between column (per-cell) profiles, the
+# mapping is effectively one shared spot profile reused for every cell, so the
+# argmax read-out is cell-independent regardless of how much spread it has.
+# Validated numerically: 1.00 for a purely shared profile, 0.92 when the
+# cell-specific component is 30% of it, 0.10 at 300%.
+COL_PROFILE_CORR_DEGENERATE = 0.9
 
 
 def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray,
@@ -783,6 +824,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         LOG.info("  coefficient diagnostics: " + "  ".join(
             f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
             for k, v in diag.items()))
+        pc = diag.get("col_profile_corr")
+        if pc == pc and pc is not None and pc > COL_PROFILE_CORR_DEGENERATE:
+            LOG.warning(
+                "  col_profile_corr=%.4f > %.2f: every cell's column of "
+                "Coefficient is essentially the SAME shared spot profile, so the "
+                "argmax is cell-INDEPENDENT by construction and the read-out "
+                "carries no per-cell information. COME has learned which spots "
+                "reconstruct expression well, not which cell goes where. NOTE "
+                "col_std_rel can look healthy (~0.17) while this holds. Remedies, "
+                "in order: (1) more training -- a 2-epoch smoke fit shows exactly "
+                "this and the preset uses 500 pretrain + 200 train; (2) "
+                "--init_coefficient cosine, whose similarity is inherently "
+                "two-way so column profiles differ from step 0.",
+                pc, COL_PROFILE_CORR_DEGENERATE)
         if diag["col_std_rel"] <= COL_STD_REL_DEGENERATE:
             LOG.warning("  col_std_rel=%.3g <= %.0e: every cell's column of "
                         "Coefficient is effectively CONSTANT across spots, so the "
