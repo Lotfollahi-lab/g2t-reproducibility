@@ -1,39 +1,47 @@
 #!/usr/bin/env python
-"""Score the cell-subsampling robustness conditions on the fixed evaluation set E.
+"""Score the cell-subsampling robustness conditions. Spearman only.
 
-Spearman only, by design: Sum RSSD is a root-SUM so it scales with cell count and
-is not comparable across conditions, and Contact F1's 0.01 percentile changes
-physical meaning when the cloud is thinned.
+Sum RSSD is excluded because it is a root-SUM and scales with cell count; Contact
+F1 because its 0.01 percentile changes physical meaning when the cloud is thinned.
 
-WHY THIS SCRIPT EXISTS RATHER THAN compute_extended_metrics.py
---------------------------------------------------------------
-Reading metadata_pred.csv as written would manufacture a result. The prediction
-is min-max normalised per axis over the WHOLE presented predicted cloud
-(scgg/src/utils/diffusion_model/test/test.py:273-274 -> position_normalize, which
-takes its else-branch because to_dataframe emits no cell_section column). Per-axis
-min-max is set by the single most extreme predicted cell -- usually a non-E cell --
-and thinning drops it. With the model held FROZEN, that alone moved an E-only
-Spearman 0.6469 -> 0.6494 -> 0.6318 -> 0.7604 across reference/50/25/10%: a +0.13
-non-monotonic swing, larger than any robustness effect worth reporting and shaped
-like the flattering conclusion "G2T improves when you profile fewer cells".
+WHY NOT compute_extended_metrics.py
+-----------------------------------
+Reading metadata_pred.csv as written would manufacture a result. The prediction is
+min-max normalised PER AXIS over the whole presented predicted cloud
+(scgg/src/utils/diffusion_model/test/test.py:273-274 -> position_normalize, else
+branch, because to_dataframe emits no cell_section column). That scale is set by
+the single most extreme predicted cell, which thinning removes. With the model
+held FROZEN this alone moved a subset Spearman 0.6469 -> 0.6494 -> 0.6318 ->
+0.7604 across reference/50/25/10%: a +0.13 non-monotonic swing, larger than any
+real effect and shaped like the flattering conclusion "G2T improves when you
+profile fewer cells".
 
-The truth side has the same structural problem (data_module.py:51) but is benign:
-E is present in every condition and pins the bounding box, so measured aspect-ratio
-drift is <=0.6%, worth ~1e-4 on the metric.
+FIX: subset both frames to the scored cells FIRST on one shared index, then
+per-axis standardise each over those cells, then score. For
+written = (raw - m)/R - 0.5, standardising gives (raw - mean(raw))/std(raw): the
+presented-set constants m and R cancel identically (verified to 3e-15).
 
-FIX: subset both frames to E FIRST on one shared index, then per-axis standardise
-each over E, then score. For written = (raw - m)/R - 0.5, standardising over E
-gives (raw - mean_E(raw))/std_E(raw): the presented-set constants m and R cancel
-identically. In the frozen-model scenario above this is stable to four decimals.
+THE METRIC-vs-N CONTROL (--control_from)
+---------------------------------------
+Scoring every presented cell means the scored set differs between conditions. Per
+cell Spearman of pairwise-distance ranks has N-invariant endpoints (perfect -> 1,
+random -> ~0 at any N), so this adds variance rather than much bias -- but that is
+an argument, and a number is better. --control_from rescores the 100% run's OWN
+predictions on random subsets matching each condition's size. The model is fixed,
+so any movement there is PURE METRIC ARTIFACT, and
 
-Consequence to state in any write-up: the E-only reference value will NOT equal the
-published 31-slice number, because E is a subset and the frame differs. Read the
-conditions against each other, never against the headline.
+    model effect = actual(f) - control(f)
+
+is the quantity to report. Needs no GPU: it reuses artifacts already on disk.
+
+Values here are NOT comparable to the published 31-slice Spearman: the scored set
+and the frame both differ. Compare conditions to each other only.
 
 USAGE
     python score_subsample_robustness.py \
-        --cond_root <ARTIFACTS>/robustness/arm_number \
-        --runs uniform_rest100=<out>/uniform_rest100,uniform_rest050=<out>/... \
+        --cond_root <ART>/robustness/arm_depth \
+        --runs slice100=<runs>/slice100__seed0,slice050=<runs>/slice050__seed0 \
+        --control_from <runs>/slice100__seed0 \
         --scgg_src /nfs/team361/sb75/scgg/src
 """
 
@@ -46,7 +54,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-COL_X, COL_Y, COL_CLASS = "coord_X", "coord_Y", "cell_class"
+COL_X, COL_Y, COL_CLASS, COL_SEC = "coord_X", "coord_Y", "cell_class", "cell_section"
 
 
 def load_metric_fn(scgg_src: Path):
@@ -56,138 +64,174 @@ def load_metric_fn(scgg_src: Path):
     return compute_spearman_correlation
 
 
-def standardise_over_E(a: np.ndarray) -> np.ndarray:
-    """Per-axis z-score. Cancels position_normalize's presented-set constants."""
+def standardise(a: np.ndarray) -> np.ndarray:
+    """Per-axis z-score over the scored cells; cancels position_normalize."""
     mu, sd = a.mean(axis=0), a.std(axis=0)
     if not np.all(np.isfinite(sd)) or np.any(sd <= 0):
-        raise ValueError(f"degenerate axis in E (std={sd}); cannot standardise")
+        raise ValueError(f"degenerate axis (std={sd}); cannot standardise")
     return (a - mu) / sd
 
 
-def resolve_slice(idx: pd.Index, e_by_sec: dict[str, np.ndarray]) -> str:
-    """Recover section identity from cell ids, never from the directory name.
+def collect_slices(run_root: Path, sec_of: pd.Series) -> dict:
+    """{section: (true_df, pred_df)} for one run.
 
-    test.py:242-249 looks the slice name up by cell COUNT
-    (mapping_dict[positions_pred.shape[0]]), so under subsampling the written
-    directory name is not trustworthy: a collision silently gives two slices the
-    same name with no warning.
+    Section identity comes from the CELL IDS, never the directory name:
+    test.py:241-249 resolves the name via mapping_dict[n_cells] built by
+    inverting {section: n_cells}, so under subsampling a count collision
+    silently merges two sections and a miss yields "unknown".
     """
-    hits = [s for s, e in e_by_sec.items() if pd.Index(e).isin(idx).all()]
-    if len(hits) != 1:
-        raise RuntimeError(
-            f"could not identify slice from its cell ids: {len(hits)} candidate "
-            f"section(s) fully contained ({hits[:4]}). Either E is incomplete in "
-            f"this output or two sections share an E subset.")
-    return hits[0]
-
-
-def score_run(run_root: Path, e_by_sec: dict[str, np.ndarray],
-              cls_by_id: pd.Series, metric_fn) -> tuple[dict, pd.DataFrame]:
-    per_slice, per_cell_rows = [], []
+    out = {}
     preds = sorted(run_root.rglob("metadata_pred.csv"))
     if not preds:
         raise SystemExit(f"no metadata_pred.csv under {run_root}")
-
     for pth in preds:
-        true_p = pth.parent / "metadata_true.csv"
-        if not true_p.exists():
+        tp = pth.parent / "metadata_true.csv"
+        if not tp.exists():
             raise SystemExit(f"{pth.parent}: metadata_true.csv missing")
         pred = pd.read_csv(pth, index_col=0)
-        true = pd.read_csv(true_p, index_col=0)
+        true = pd.read_csv(tp, index_col=0)
         if not pred.index.equals(true.index):
             raise SystemExit(f"{pth.parent}: pred/true indices differ")
+        secs = sec_of.reindex(pred.index)
+        if secs.isna().any():
+            raise SystemExit(f"{pth.parent}: {int(secs.isna().sum())} cell id(s) "
+                             f"absent from cell_index.csv — wrong --cond_root?")
+        uniq = secs.unique()
+        if len(uniq) != 1:
+            raise SystemExit(f"{pth.parent}: cells span {len(uniq)} sections "
+                             f"({list(uniq)[:4]}) — output directories were merged")
+        sec = str(uniq[0])
+        if sec in out:
+            raise SystemExit(f"two output directories resolved to section {sec}")
+        out[sec] = (true, pred)
+    return out
 
-        sec = resolve_slice(pred.index, e_by_sec)
-        e = pd.Index(e_by_sec[sec])
-        # One shared index object for both frames -> identical row order.
-        t = standardise_over_E(true.loc[e, [COL_X, COL_Y]].to_numpy(float))
-        p = standardise_over_E(pred.loc[e, [COL_X, COL_Y]].to_numpy(float))
 
-        spr = metric_fn(t, p, backend="scipy")
-        rho = np.asarray(spr["per_cell"], dtype=float)
-        # luna_metrics.py:196 silently drops NaN rho before the median, and
-        # aggregate_slices drops NaN slices while n_slices comes from a
-        # different stack -- so "mean of 31" can quietly become "mean of 30".
-        if np.isnan(rho).any():
-            raise SystemExit(f"{sec}: {int(np.isnan(rho).sum())} NaN per-cell rho")
-        if int(spr["n"]) != len(e):
-            raise SystemExit(f"{sec}: scored {spr['n']} cells, expected {len(e)}")
-
-        per_slice.append({"section": sec, "n_eval": len(e),
-                          "median_rho": float(np.median(rho)),
-                          "mean_rho": float(rho.mean())})
-        per_cell_rows.append(pd.DataFrame({
-            "section": sec, "cell_id": e.to_numpy(),
-            "cell_class": cls_by_id.reindex(e).to_numpy(), "rho": rho}))
-
-    ps = pd.DataFrame(per_slice).sort_values("section")
-    if len(ps) != len(e_by_sec):
-        raise SystemExit(f"scored {len(ps)} slices, expected {len(e_by_sec)}")
-    if ps["section"].duplicated().any():
-        raise SystemExit("two output directories resolved to the same section")
-    agg = {"spearman_mean_of_medians": float(ps["median_rho"].mean()),
-           "n_slices": int(len(ps)), "n_eval_cells": int(ps["n_eval"].sum())}
-    return agg, pd.concat(per_cell_rows, ignore_index=True), ps
+def score_index(true: pd.DataFrame, pred: pd.DataFrame, idx: pd.Index,
+                metric_fn) -> np.ndarray:
+    t = standardise(true.loc[idx, [COL_X, COL_Y]].to_numpy(float))
+    p = standardise(pred.loc[idx, [COL_X, COL_Y]].to_numpy(float))
+    spr = metric_fn(t, p, backend="scipy")
+    rho = np.asarray(spr["per_cell"], dtype=float)
+    # luna_metrics.py:196 drops NaN rho before the median, and aggregate_slices
+    # drops NaN slices while n_slices comes from a different stack -- so "mean of
+    # 31" can quietly become "mean of 30". Refuse instead.
+    if np.isnan(rho).any():
+        raise SystemExit(f"{int(np.isnan(rho).sum())} NaN per-cell rho")
+    if int(spr["n"]) != len(idx):
+        raise SystemExit(f"scored {spr['n']} cells, expected {len(idx)}")
+    return rho
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--cond_root", required=True,
-                   help="dir written by make_subsample_conditions.py (has E_manifest.csv)")
-    p.add_argument("--runs", required=True,
-                   help="comma-separated name=/path/to/inference/output pairs")
+                   help="dir from make_subsample_conditions.py (has cell_index.csv)")
+    p.add_argument("--runs", required=True, help="comma-separated name=path pairs")
+    p.add_argument("--eval", default="all", choices=("all", "E"),
+                   help="'all' scores every presented cell (primary); 'E' scores "
+                        "only the fixed evaluation set from E_manifest.csv")
+    p.add_argument("--control_from", default="",
+                   help="run root of the 100%% condition; rescores ITS predictions "
+                        "on random subsets to measure the metric-vs-N artifact")
+    p.add_argument("--control_reps", type=int, default=3)
+    p.add_argument("--control_seed", type=int, default=0)
     p.add_argument("--scgg_src", default="/nfs/team361/sb75/scgg/src")
     p.add_argument("--out_csv", default="")
     args = p.parse_args()
 
     root = Path(args.cond_root)
-    man = pd.read_csv(root / "E_manifest.csv", index_col=0)
-    e_by_sec = {str(s): np.sort(g.index.to_numpy())
-                for s, g in man.groupby(man["cell_section"].astype(str))}
-    cls_by_id = man[COL_CLASS].astype(str)
-    print(f"E: {len(man)} cells across {len(e_by_sec)} sections")
-
+    ci = pd.read_csv(root / "cell_index.csv", index_col=0)
+    sec_of, cls_of = ci[COL_SEC].astype(str), ci[COL_CLASS].astype(str)
     metric_fn = load_metric_fn(Path(args.scgg_src))
 
-    rows, per_class_all, class_sets = [], [], {}
+    e_idx = None
+    if args.eval == "E":
+        man = pd.read_csv(root / "E_manifest.csv", index_col=0)
+        e_idx = {s: g.index for s, g in man.groupby(man[COL_SEC].astype(str))}
+        print(f"scoring the fixed evaluation set: {len(man)} cells")
+    else:
+        print("scoring ALL presented cells in each condition")
+
+    rows, per_class = [], []
+    n_expected = None
     for item in args.runs.split(","):
         if "=" not in item:
             raise SystemExit(f"--runs entry must be name=path, got {item!r}")
-        name, path = item.split("=", 1)
-        agg, pc, _ = score_run(Path(path.strip()), e_by_sec, cls_by_id, metric_fn)
-        rows.append({"condition": name.strip(), **agg})
-        pc["condition"] = name.strip()
-        per_class_all.append(pc)
-        class_sets[name.strip()] = frozenset(pc["cell_class"].unique())
-        print(f"  {name.strip():22s} Spearman(mean-of-medians)="
-              f"{agg['spearman_mean_of_medians']:.4f}  slices={agg['n_slices']}")
-
-    if len(set(class_sets.values())) != 1:
-        print("\n[warn] the cell_class set in E differs between conditions; "
-              "per-class rows are not directly comparable", file=sys.stderr)
+        name, path = (s.strip() for s in item.split("=", 1))
+        slices = collect_slices(Path(path), sec_of)
+        if n_expected is None:
+            n_expected = len(slices)
+        elif len(slices) != n_expected:
+            raise SystemExit(f"{name}: {len(slices)} slices, others had {n_expected}")
+        meds, n_tot = [], 0
+        for sec, (true, pred) in sorted(slices.items()):
+            idx = pred.index if e_idx is None else e_idx[sec]
+            rho = score_index(true, pred, idx, metric_fn)
+            meds.append(float(np.median(rho)))
+            n_tot += len(idx)
+            per_class.append(pd.DataFrame({
+                "condition": name, "cell_class": cls_of.reindex(idx).to_numpy(),
+                "rho": rho}))
+        rows.append({"condition": name, "spearman_mean_of_medians": float(np.mean(meds)),
+                     "n_slices": len(meds), "n_scored_cells": n_tot})
+        print(f"  {name:14s} Spearman={rows[-1]['spearman_mean_of_medians']:.4f}  "
+              f"slices={len(meds)}  cells={n_tot}")
 
     res = pd.DataFrame(rows)
-    ref = res.iloc[0]["spearman_mean_of_medians"]
-    res["delta_vs_first"] = res["spearman_mean_of_medians"] - ref
-    res["pct_vs_first"] = 100.0 * res["delta_vs_first"] / ref
+    frac = None
+    cpath = root / "conditions.csv"
+    if cpath.exists():
+        cf = pd.read_csv(cpath).set_index("condition")["frac_of_slice_presented"]
+        res["frac_presented"] = [cf.get(n.split("_seed")[0], np.nan)
+                                 for n in res["condition"]]
+        frac = res["frac_presented"]
 
-    print("\n=== E-only Spearman by condition (first row = comparator) ===")
-    print(res.to_string(index=False))
+    # ---- metric-vs-N control ------------------------------------------------
+    if args.control_from:
+        ref = collect_slices(Path(args.control_from), sec_of)
+        ref_n = {s: len(pr.index) for s, (_, pr) in ref.items()}
+        ctl = []
+        for i, r in res.iterrows():
+            f = r.get("frac_presented", np.nan)
+            if not np.isfinite(f):
+                ctl.append((np.nan, np.nan)); continue
+            vals = []
+            for rep in range(args.control_reps):
+                rng = np.random.default_rng(args.control_seed + 1000 * rep
+                                            + int(round(f * 1e4)))
+                meds = []
+                for sec, (true, pred) in sorted(ref.items()):
+                    k = max(3, int(round(f * ref_n[sec])))
+                    sub = pd.Index(rng.choice(pred.index.to_numpy(),
+                                              size=min(k, ref_n[sec]),
+                                              replace=False))
+                    meds.append(float(np.median(
+                        score_index(true, pred, sub, metric_fn))))
+                vals.append(float(np.mean(meds)))
+            ctl.append((float(np.mean(vals)), float(np.std(vals))))
+        res["control_metric_only"] = [c[0] for c in ctl]
+        res["control_sd"] = [c[1] for c in ctl]
+        res["model_effect"] = res["spearman_mean_of_medians"] - res["control_metric_only"]
 
-    # The flat median over E is nearly blind to a depleted class: those cells are
-    # a handful of rows and cannot move it. Per-class is what R2 actually asks about.
-    pca = pd.concat(per_class_all, ignore_index=True)
-    tab = (pca.groupby(["condition", "cell_class"])["rho"]
+    print("\n=== Spearman by condition ===")
+    print(res.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if "model_effect" in res:
+        print("\ncontrol_metric_only = the 100% run's OWN predictions rescored on "
+              "random subsets of the same size (model fixed).")
+        print("model_effect = actual - control. THIS is the robustness result; "
+              "anything within control_sd is not resolvable.")
+
+    pc = pd.concat(per_class, ignore_index=True)
+    tab = (pc.groupby(["condition", "cell_class"])["rho"]
              .agg(median="median", n="size").reset_index())
-    print("\n=== per-class E-only Spearman (median over that class's cells) ===")
-    piv = tab.pivot(index="cell_class", columns="condition", values="median")
-    print(piv.to_string(float_format=lambda v: f"{v:.4f}"))
+    print("\n=== per-class Spearman (median over that class's scored cells) ===")
+    print(tab.pivot(index="cell_class", columns="condition", values="median")
+             .to_string(float_format=lambda v: f"{v:.4f}"))
 
-    print("\nNOTE: these values are NOT comparable to the published 31-slice "
-          "Spearman — E is a subset and is scored in an E-standardised frame. "
-          "Compare conditions to each other only.")
-
+    print("\nNOTE: not comparable to the published 31-slice Spearman — different "
+          "scored set and frame. Compare conditions to each other only.")
     if args.out_csv:
         res.to_csv(args.out_csv, index=False)
         tab.to_csv(str(Path(args.out_csv).with_suffix("")) + "_per_class.csv",

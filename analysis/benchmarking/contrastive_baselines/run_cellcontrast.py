@@ -37,19 +37,26 @@ in structurally the same position as CeLEry, which also predicts into the
 training frame.
 
 Because each training slice has its own micron frame, we min-max normalise every
-slice's coordinates to [-0.5, 0.5] before training. Predictions therefore come
-back in that shared normalised frame, and we invert them with the TEST slice's
-own scaler so Sum RSSD is computed against original-scale truth.
+slice's coordinates into a shared [-0.5, 0.5] box before training, and invert
+predictions with the TEST slice's own scaler so the written artifacts are in
+original microns (matching CeLEry and novosparc).
 
-The default normalisation is PER-AXIS (matching LUNA/G2T's position_normalize),
-which is NOT a similarity transform. Upstream builds its k=80 spatial-neighbour
-positive graph with a KDTree over these coordinates, so per-axis scaling changes
-which cells are positives: measured on the MMC train split that is ~7% of the
-positive set at the median slice aspect (1.25) and ~14% at the worst (1.59). It
-also shifts the Spearman ranks and the Contact F1 percentile threshold, not Sum
-RSSD alone. Pass isotropic=True to SliceCoordScaler to reproduce the raw-micron
-neighbour ranking exactly; see its docstring for the trade-off against harness
-parity.
+COORDINATE FRAME (``--coord_frame``, default ISOTROPIC).
+Upstream builds its k=80 positive graph with a KDTree over exactly these
+coordinates (``loadData.checkNeighbors``), so the metric we hand it decides which
+cells are positives.
+  * ``isotropic`` (default): both axes divided by the LARGER span, box centred.
+    Aspect preserved, so the neighbour ranking is IDENTICAL to raw microns —
+    i.e. the authors' positive graph, unchanged. This is why it is the default.
+  * ``per_axis``: each axis divided by its own span (what LUNA/G2T's
+    ``position_normalize`` does). NOT a similarity transform: measured on the MMC
+    train split it alters ~7% of the k=80 positive set at the median slice aspect
+    (1.25) and ~14% at the worst (1.59), and it perturbs the Spearman ranks and
+    the Contact F1 threshold too — not Sum RSSD alone. Kept only for
+    reproducing earlier runs.
+Note this is INDEPENDENT of the frame the artifacts are written in (always
+microns) and of the cross-method RSSD frame problem, which is scorer-side
+(``compute_extended_metrics.py --rssd_frame``).
 
 Usage (cortex):
     python run_cellcontrast.py \
@@ -58,9 +65,14 @@ Usage (cortex):
         --out_root /nfs/team361/sb75/scgg-reproducibility/artifacts \
         --dataset mmc_luna --seed 0
 
-Usage (CNS — needs subsampling and the Harmony latent; see --help):
+Usage (CNS). The shared 600-d cross-platform latent lives in ``adata.X`` ITSELF,
+not in any obsm key (the only obsm key on those h5ads is ``spatial``), so do NOT
+pass --use_obsm; hand the latent over untouched. Passing --use_obsm spatial would
+feed GROUND-TRUTH COORDINATES as features and is refused.
     python run_cellcontrast.py --data_dir .../cns_luna --dataset cns_luna \
-        --use_obsm X_harmony --max_train_cells 150000 ...
+        --expression_mode silver_raw --max_train_cells 150000 \
+        --exclude_test_files sagittal1_test.h5ad,sagittal2_test.h5ad,\
+sagittal3_test.h5ad,spinalcord_test.h5ad ...
 
 Always start with --smoke_test (minutes, proves the install) before a real run.
 """
@@ -93,7 +105,6 @@ __version__ = "2026-08-13-run-cellcontrast-v1"
 
 LOG = logging.getLogger("cellcontrast")
 UNS_X, UNS_Y = "referenced x", "referenced y"
-UNS_SIM = "cosine sim of rep"          # dense N x N; strip before saving
 SAMPLE_FIELD = "embryo"                # hardcoded upstream
 
 
@@ -115,14 +126,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "reports >1000 is needed). Lower values are a DEVIATION and "
                         "are recorded in the manifest.")
     p.add_argument("--single_cell", action="store_true", default=True,
-                   help="pass -sc (imaging-resolution ST). Default True for MERFISH.")
-    p.add_argument("--no_single_cell", dest="single_cell", action="store_false")
+                   help="select the authors' IMAGING-ST parameters "
+                        "(parameters_singleCell.json, k_nearest_positives=80). "
+                        "Default True: MERFISH/STARmap/Xenium.")
+    p.add_argument("--no_single_cell", dest="single_cell", action="store_false",
+                   help="select the authors' SPOT-ST parameters "
+                        "(parameters_spot.json, k_nearest_positives=20). REQUIRED "
+                        "for Visium/spot data -- the paper's k is platform-specific "
+                        "(80 for SeqFISH/MERSCOPE, 20 for Stereo-seq/10x Visium).")
+    p.add_argument("--force_platform", action="store_true",
+                   help="bypass the dataset-name vs --single_cell consistency check.")
     p.add_argument("--expression_mode", default="log2", choices=("log2", "silver_raw"),
-                   help="log2 = log2(1+x), parity with LUNA/G2T/CeLEry (default). "
-                        "silver_raw hands over the silver matrix untouched.")
+                   help="log2 = log2(1+x) (default). This is NOT parity with the "
+                        "other baselines -- LUNA/G2T/novosparc apply the identity "
+                        "and CeLEry adds a z-score; log2_norm has zero call sites "
+                        "in either repo. It is chosen for fidelity to the "
+                        "CellContrast paper ('log-normalized ... by scran'; scran "
+                        "logNormCounts = size-factor normalise then log base 2), "
+                        "which composes correctly on count-magnitude silver X. "
+                        "silver_raw hands the matrix over untouched -- REQUIRED for "
+                        "the both-sign cns_luna latent and for raw-count silver dirs.")
+    p.add_argument("--coord_frame", default="isotropic",
+                   choices=("isotropic", "per_axis"),
+                   help="how per-slice coordinates are put in a shared box. "
+                        "isotropic (default) preserves aspect, so upstream's k-NN "
+                        "positive graph is IDENTICAL to raw microns. per_axis "
+                        "matches LUNA/G2T position_normalize but changes ~7-14%% of "
+                        "the positive set. See the module docstring.")
     p.add_argument("--use_obsm", default=None,
-                   help="use adata.obsm[KEY] as the feature matrix instead of .X "
-                        "(cns_luna: the 600-d Harmony latent, matching our protocol)")
+                   help="use adata.obsm[KEY] as the feature matrix instead of .X. "
+                        "NOT needed for cns_luna: its 600-d shared latent is in .X "
+                        "itself (only obsm key there is 'spatial'). Passing "
+                        "'spatial' is refused -- it would feed ground-truth "
+                        "coordinates as features.")
+    p.add_argument("--query_chunk", type=int, default=8000,
+                   help="split each test slice into chunks of this many cells for "
+                        "inference and concatenate. Upstream builds dense "
+                        "query x query AND query x reference matrices (plus a full "
+                        "argsort index), so an unchunked large slice needs hundreds "
+                        "of GB. top-1 retrieval is per-query-row independent, so "
+                        "chunking is BIT-IDENTICAL. Slices at or below this size "
+                        "take the original single-call path. 0 disables chunking.")
+    p.add_argument("--max_mem_gb", type=float, default=None,
+                   help="refuse to start if the estimated inference peak exceeds "
+                        "this (GB). Estimate = max(24*c^2, 16*c^2 + 24*c*R) bytes, "
+                        "measured constants for float32 sim + float32 sorted + "
+                        "int64 argsort. Set it to the LSF -M value.")
     p.add_argument("--max_train_cells", type=int, default=None,
                    help="cap total training cells by per-slice stratified subsampling. "
                         "REQUIRED in practice for cns_luna (2.85M cells is ~9 days). "
@@ -151,14 +200,42 @@ def _import_anndata():
         ) from exc
 
 
-def _feature_matrix(adata, use_obsm: Optional[str], expression_mode: str) -> np.ndarray:
+def _assert_finite(M: np.ndarray, what: str) -> np.ndarray:
+    """Refuse non-finite features.
+
+    Upstream's only NaN handling is ``np.nan_to_num`` inside loadTrainData
+    (loadData.py:79) -- it is TRAIN-ONLY. At inference a NaN feature row makes
+    every cosine similarity NaN; NaN sorts last ascending, so upstream's
+    ``argsort(...)[::-1][0]`` lands ON the NaN and the cell is silently assigned
+    reference cell N-1's coordinate. That survives the frame check, the
+    pair-membership check and ``np.isfinite`` on the output, so it can only be
+    caught here.
+    """
+    if not np.isfinite(M).all():
+        n_bad = int((~np.isfinite(M)).any(axis=1).sum())
+        raise ValueError(
+            f"{what}: {n_bad} row(s) contain NaN/Inf features. Upstream only "
+            f"nan_to_num's the TRAINING matrix, so at inference these cells would "
+            f"be silently assigned the last reference cell's coordinates.")
+    return M
+
+
+def _feature_matrix(adata, use_obsm: Optional[str], expression_mode: str,
+                    what: str = "features") -> np.ndarray:
     """Feature matrix for the encoder, matching our other baselines' input."""
     if use_obsm:
+        if use_obsm == "spatial":
+            raise ValueError(
+                "--use_obsm spatial would hand GROUND-TRUTH COORDINATES to the "
+                "encoder as features, defeating the coordinate withholding in "
+                "build_query and invalidating every metric. Refused. (For "
+                "cns_luna the shared latent is in .X: drop --use_obsm and pass "
+                "--expression_mode silver_raw.)")
         if use_obsm not in adata.obsm:
             raise KeyError(f"obsm[{use_obsm!r}] absent; have {list(adata.obsm.keys())}")
         M = np.asarray(adata.obsm[use_obsm], dtype=np.float32)
         # An embedding is already normalised; log2 on a latent would be nonsense.
-        return M
+        return _assert_finite(M, what)
     X = adata.X
     X = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
     if expression_mode == "log2":
@@ -176,7 +253,7 @@ def _feature_matrix(adata, use_obsm: Optional[str], expression_mode: str) -> np.
             LOG.warning("matrix has negative values (min %.4g); log2(1+x) is "
                         "defined but this is unexpected for counts", mn)
         X = np.log2(1.0 + X, dtype=np.float32)
-    return X
+    return _assert_finite(X, what)
 
 
 def _coords_of(adata) -> np.ndarray:
@@ -200,21 +277,37 @@ def _var_names_for(adata, use_obsm: Optional[str]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 def build_reference(
     ad_mod, train_files: List[Path], args, rng: np.random.Generator, work: Path,
-) -> Path:
+    k_pos: int = 0,
+):
     """Concatenate training slices into the single reference object upstream wants.
 
     Sets obs['x'], obs['y'] to PER-SLICE NORMALISED coordinates and obs['embryo']
     to the slice label so the spatial kNN never crosses sections.
+
+    Returns ``(path, var_names, n_obs, xmin, xmax)`` so the caller can record
+    provenance and cross-check the test panel.
     """
     per_slice_cap = None
     if args.max_train_cells:
         per_slice_cap = max(1, args.max_train_cells // max(1, len(train_files)))
+        # loadData.checkNeighbors queries the KDTree with k = k_pos + 1 and
+        # raises if a sample has fewer cells than that -- AFTER we have built and
+        # written the whole reference. Catch it before doing that work.
+        if k_pos and per_slice_cap < k_pos + 1:
+            raise ValueError(
+                f"--max_train_cells {args.max_train_cells} over {len(train_files)} "
+                f"slices gives {per_slice_cap} cells/slice, but upstream needs at "
+                f"least k_nearest_positives+1 = {k_pos + 1} per slice "
+                f"(loadData.checkNeighbors KDTree). Raise --max_train_cells to "
+                f"at least {(k_pos + 1) * len(train_files)}.")
 
+    isotropic = (getattr(args, "coord_frame", "isotropic") == "isotropic")
     blocks, xs, ys, embryo, classes, var_ref = [], [], [], [], [], None
     for f in train_files:
         a = ad_mod.read_h5ad(f)
         label = section_label_from_filename(f)
-        feats = _feature_matrix(a, args.use_obsm, args.expression_mode)
+        feats = _feature_matrix(a, args.use_obsm, args.expression_mode,
+                               what=f"train slice {f.name}")
         coords = _coords_of(a)
         vn = _var_names_for(a, args.use_obsm)
         if var_ref is None:
@@ -233,7 +326,7 @@ def build_reference(
                    if COL_CLASS in a.obs else np.full(feats.shape[0], "NA"))
 
         # per-slice normalisation puts every section in a shared frame
-        cn = SliceCoordScaler().fit(coords).transform(coords)
+        cn = SliceCoordScaler(isotropic=isotropic).fit(coords).transform(coords)
         blocks.append(feats)
         xs.append(cn[:, 0]); ys.append(cn[:, 1])
         embryo.append(np.full(feats.shape[0], label, dtype=object))
@@ -266,7 +359,9 @@ def build_reference(
 
     out = work / "reference_train.h5ad"
     ref.write_h5ad(out)
-    return out
+    Xr = np.asarray(ref.X)
+    return (out, [str(v) for v in ref.var_names], int(ref.n_obs),
+            float(Xr.min()), float(Xr.max()))
 
 
 def _make_adata(ad_mod, X: np.ndarray, obs: Dict[str, np.ndarray], var_names):
@@ -278,22 +373,67 @@ def _make_adata(ad_mod, X: np.ndarray, obs: Dict[str, np.ndarray], var_names):
     return a
 
 
-def build_query(ad_mod, test_file: Path, args, work: Path):
-    """Query object for one test slice: features only, no coordinates.
+def load_query(ad_mod, test_file: Path, args):
+    """Read one test slice into arrays: features, truth coords, labels, obs_names.
 
-    Withholding coordinates is deliberate — inference needs only .X and
-    .var_names, so the truth cannot leak into the prediction even accidentally.
+    Coordinates are loaded for SCORING only and are never written into the query
+    object handed to upstream (see write_query_chunk) — inference needs only .X
+    and .var_names, so the truth cannot leak into the prediction.
     """
     a = ad_mod.read_h5ad(test_file)
-    feats = _feature_matrix(a, args.use_obsm, args.expression_mode)
+    feats = _feature_matrix(a, args.use_obsm, args.expression_mode,
+                           what=f"test slice {test_file.name}")
     vn = _var_names_for(a, args.use_obsm)
     coords_true = _coords_of(a)
-    cls = (a.obs[COL_CLASS].astype(str).to_numpy()
-           if COL_CLASS in a.obs else None)
-    q = _make_adata(ad_mod, feats, {"placeholder": np.zeros(feats.shape[0])}, vn)
-    path = work / f"query_{section_label_from_filename(test_file)}.h5ad"
+    if COL_CLASS not in a.obs:
+        # write_slice_artifacts omits the column entirely when cell_class is
+        # None, and compute_extended_metrics indexes it unconditionally -- the
+        # run would score as NaN rather than fail. Refuse here instead.
+        raise ValueError(
+            f"{test_file.name}: obs[{COL_CLASS!r}] missing. The scorer requires "
+            f"the cell_class column in metadata_*.csv (a 3-column file yields "
+            f"NaN sum_rssd by construction).")
+    cls = a.obs[COL_CLASS].astype(str).to_numpy()
+    obs_names = np.asarray(a.obs_names, dtype=object)
+    return feats, coords_true, cls, obs_names, vn
+
+
+def write_query_chunk(ad_mod, feats: np.ndarray, var_names, work: Path,
+                      tag: str) -> Path:
+    """Write one query h5ad (features only, no coordinates)."""
+    q = _make_adata(ad_mod, feats, {"placeholder": np.zeros(feats.shape[0])},
+                    var_names)
+    path = work / f"query_{tag}.h5ad"
     q.write_h5ad(path)
-    return path, coords_true, cls, feats.shape[0]
+    return path
+
+
+def chunk_bounds(n: int, chunk: int) -> List[tuple]:
+    """Contiguous [start, stop) row ranges covering n rows.
+
+    Chunking is BIT-IDENTICAL for this method: ``inference.map_to_ST`` takes,
+    for each query row independently, the argmax over the FULL reference, and
+    the discarded query x query similarity matrix feeds only runMDS/eval, which
+    we never invoke. A slice at or below ``chunk`` yields a single range, i.e.
+    exactly the original single-call path.
+    """
+    if chunk and 0 < chunk < n:
+        return [(s, min(s + chunk, n)) for s in range(0, n, chunk)]
+    return [(0, n)]
+
+
+def estimate_peak_bytes(n_query_chunk: int, n_ref: int) -> int:
+    """Peak resident bytes of one upstream inference call.
+
+    ``utils.getModelSimMat`` builds a float32 similarity matrix, a float32
+    sorted copy and an int64 argsort index (16 B/element resident, ~24 B/element
+    at the transient doubling inside the row loop). It runs UNCONDITIONALLY on
+    query x query (inference.py:120, before the enable_denovo guard) and those
+    arrays stay bound while map_to_ST builds query x reference. Hence
+    ``max(24*Q^2, 16*Q^2 + 24*Q*R)``.
+    """
+    q, r = int(n_query_chunk), int(n_ref)
+    return max(24 * q * q, 16 * q * q + 24 * q * r)
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +476,39 @@ def find_checkpoint(model_dir: Path) -> Path:
 
 
 def read_predicted_coords(ad_mod, path: Path, n_expected: int) -> np.ndarray:
-    a = ad_mod.read_h5ad(path)
-    for k in (UNS_X, UNS_Y):
-        if k not in a.uns:
-            raise KeyError(f"{path}: uns[{k!r}] missing; have {list(a.uns.keys())}")
-    xy = np.column_stack([np.asarray(a.uns[UNS_X], dtype=np.float64).ravel(),
-                          np.asarray(a.uns[UNS_Y], dtype=np.float64).ravel()])
+    """Read uns['referenced x'/'y'] WITHOUT materialising the N x N matrix.
+
+    Upstream stores the dense query x query float32 similarity matrix in
+    ``uns['cosine sim of rep']`` of this same file (16 GB for a 63k-cell slice),
+    and anndata materialises ``uns`` in full EVEN WITH ``backed="r"`` (verified),
+    so a plain read_h5ad here can OOM on exactly the slices we just spent hours
+    predicting. h5py reads only the two coordinate vectors.
+    """
+    try:
+        import h5py
+    except ImportError:                                   # pragma: no cover
+        h5py = None
+    if h5py is not None:
+        with h5py.File(str(path), "r") as fh:
+            uns = fh.get("uns")
+            if uns is None:
+                raise KeyError(f"{path}: no /uns group")
+            missing = [k for k in (UNS_X, UNS_Y) if k not in uns]
+            if missing:
+                raise KeyError(f"{path}: uns{missing} missing; "
+                               f"have {list(uns.keys())}")
+            xy = np.column_stack([
+                np.asarray(uns[UNS_X][...], dtype=np.float64).ravel(),
+                np.asarray(uns[UNS_Y][...], dtype=np.float64).ravel(),
+            ])
+    else:
+        a = ad_mod.read_h5ad(path)
+        for k in (UNS_X, UNS_Y):
+            if k not in a.uns:
+                raise KeyError(f"{path}: uns[{k!r}] missing; "
+                               f"have {list(a.uns.keys())}")
+        xy = np.column_stack([np.asarray(a.uns[UNS_X], dtype=np.float64).ravel(),
+                              np.asarray(a.uns[UNS_Y], dtype=np.float64).ravel()])
     if xy.shape[0] != n_expected:
         raise ValueError(f"{path}: got {xy.shape[0]} coords for {n_expected} cells")
     if not np.isfinite(xy).all():
@@ -408,6 +575,77 @@ def check_predictions(pred: np.ndarray, ref_pairs: set, label: str,
 
 
 # ---------------------------------------------------------------------------
+_SPOT_HINTS = ("visium", "dlpfc", "spot", "cytassist", "stereo", "slide")
+_IMAGING_HINTS = ("mmc", "merfish", "merscope", "xenium", "starmap", "cns",
+                  "breast", "cosmx", "seqfish")
+
+
+def platform_check(dataset: str, single_cell: bool, force: bool) -> None:
+    """Refuse an imaging/spot mismatch between the dataset and the parameter file.
+
+    The paper's ``k_nearest_positives`` is platform-specific -- 80 for
+    imaging-resolution ST (SeqFISH/MERSCOPE/Xenium/STARmap) and 20 for
+    spot-resolution ST (Stereo-seq/10x Visium) -- and that is the ONLY difference
+    between the authors' two parameter files. Running Visium with k=80 is not the
+    published method, and it is a silent misconfiguration: nothing downstream
+    would look wrong.
+    """
+    if force:
+        LOG.warning("--force_platform: skipping the dataset/parameter-file "
+                    "consistency check (k_nearest_positives=%s)",
+                    "80 (imaging)" if single_cell else "20 (spot)")
+        return
+    d = dataset.lower()
+    is_spot = any(h in d for h in _SPOT_HINTS)
+    is_imaging = any(h in d for h in _IMAGING_HINTS)
+    if is_spot and is_imaging:          # ambiguous name; let the user decide
+        return
+    if is_spot and single_cell:
+        raise SystemExit(
+            f"[cellcontrast] dataset {dataset!r} looks SPOT-based (Visium), but "
+            f"--single_cell is set, which selects parameters_singleCell.json with "
+            f"k_nearest_positives=80. The paper uses k=20 for spot ST. Pass "
+            f"--no_single_cell (or --force_platform to override).")
+    if is_imaging and not single_cell:
+        raise SystemExit(
+            f"[cellcontrast] dataset {dataset!r} looks IMAGING-based, but "
+            f"--no_single_cell selects parameters_spot.json with "
+            f"k_nearest_positives=20. The paper uses k=80 for imaging ST. Drop "
+            f"--no_single_cell (or --force_platform to override).")
+
+
+def write_seeded_launcher(work: Path, repo: Path, seed: int,
+                          sub_argv: List[str]) -> Path:
+    """Generate a launcher that seeds stdlib ``random`` before upstream runs.
+
+    Upstream shuffles the epoch's cell order and picks each anchor's ONE positive
+    with an unseeded module-level ``random.shuffle`` (loadData.py:107 and :129)
+    and exposes no seed argument, so two runs of an identical command differ.
+
+    torch's RNG is deliberately LEFT ALONE at upstream's ``torch.manual_seed(0)``
+    (model.py:6). Re-seeding it would move the weight initialisation off the
+    authors' published value for 4 of 5 replicates, which changes the method and
+    would have to be pre-registered. Seeding only stdlib random makes a replicate
+    reproducible without changing the distribution it is drawn from.
+    """
+    launcher = work / "seeded_launch.py"
+    launcher.write_text(
+        "# generated by run_cellcontrast.py -- seeds stdlib random, then hands\n"
+        "# control to the UNMODIFIED upstream dispatcher.\n"
+        "import random, sys, runpy\n"
+        f"random.seed({int(seed)})\n"
+        "try:\n"
+        "    import numpy as _np\n"
+        f"    _np.random.seed({int(seed)} % (2 ** 32))\n"
+        "except Exception:\n"
+        "    pass\n"
+        f"sys.path.insert(0, {str(repo)!r})\n"
+        f"sys.argv = {list(sub_argv)!r}\n"
+        f"runpy.run_path({str(repo / 'cellContrast.py')!r}, run_name='__main__')\n"
+    )
+    return launcher
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -420,6 +658,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     data_dir = Path(args.data_dir).resolve()
     dataset = args.dataset or data_dir.name
+    # Fail on a platform/parameter mismatch BEFORE doing hours of work.
+    platform_check(dataset, args.single_cell, args.force_platform)
+    if args.use_obsm == "spatial":
+        raise SystemExit(
+            "[cellcontrast] --use_obsm spatial would feed ground-truth "
+            "coordinates to the encoder as features. Refused. For cns_luna the "
+            "shared latent is already in .X: drop --use_obsm and pass "
+            "--expression_mode silver_raw.")
     ts = args.run_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path(args.out_root) / dataset / "cellcontrast_inference" / ts
     results = out_dir / "test_results"
@@ -444,9 +690,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     ad_mod = _import_anndata()
     params_path = write_parameters(repo, work, args)
+    params_all = json.loads(params_path.read_text())
+    k_pos = int(params_all.get("k_nearest_positives", 0))
 
     # ---- reference (also the coordinate source at inference) ----------------
-    ref_path = build_reference(ad_mod, train_files, args, rng, work)
+    ref_path, ref_var, ref_n_obs, ref_xmin, ref_xmax = build_reference(
+        ad_mod, train_files, args, rng, work, k_pos=k_pos)
 
     # ---- train once --------------------------------------------------------
     model_dir = work / "model"
@@ -464,10 +713,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # passing our own copy of parameters_singleCell.json is EXACTLY equivalent
     # while letting our overrides actually apply. ``--single_cell`` on OUR CLI
     # still selects which upstream file write_parameters() copies.
-    cmd = [sys.executable, str(entry), "train",
-           "--train_data_path", str(ref_path),
-           "--save_folder", str(model_dir),
-           "--parameter_file_path", str(params_path)]
+    #
+    # We invoke the dispatcher through a generated launcher that seeds stdlib
+    # ``random`` first (see write_seeded_launcher). Upstream's positive sampling
+    # and epoch shuffling are otherwise unseeded, so runs were not reproducible.
+    # The upstream code itself is untouched, and torch's RNG is left at the
+    # authors' hardcoded manual_seed(0).
+    train_argv = ["cellContrast.py", "train",
+                  "--train_data_path", str(ref_path),
+                  "--save_folder", str(model_dir),
+                  "--parameter_file_path", str(params_path)]
+    cmd = [sys.executable, str(write_seeded_launcher(work, repo, args.seed,
+                                                    train_argv))]
     # An earlier version warned here that upstream orders feature columns via a
     # Python set, so PYTHONHASHSEED had to be pinned for reproducibility. That
     # was WRONG, and it misled two independent code audits into reporting a
@@ -532,18 +789,35 @@ def main(argv: Optional[List[str]] = None) -> int:
             "max_train_cells": args.max_train_cells,
             "max_ref_cells": args.max_ref_cells,
             "single_cell_mode": args.single_cell,
+            "k_nearest_positives": k_pos,
             "smoke_test": args.smoke_test,
-            # Upstream hardcodes torch.manual_seed(0) at module import and
-            # exposes no seed argument, so --seed above reaches nothing in the
-            # training subprocess (it only drives --max_train_cells /
-            # --max_ref_cells subsampling here). Runs differ solely through
-            # unseeded stdlib random.shuffle in loadBatchData. Do NOT describe
-            # these as a seed sweep.
-            "seed_is_effective": bool(args.max_train_cells or args.max_ref_cells),
+            # --seed now DOES reach training: we launch the upstream dispatcher
+            # through a generated shim that seeds stdlib random first (upstream
+            # shuffles the epoch order and samples each anchor's positive with an
+            # unseeded random.shuffle and takes no seed argument). torch is left
+            # at upstream's hardcoded manual_seed(0), so the weight init is the
+            # authors' for every replicate; replicates differ in positive
+            # sampling / batch composition only. Still NOT a torch-init sweep.
+            "seed_is_effective": True,
+            "seed_scope": "stdlib random (positive sampling + epoch shuffle) and "
+                          "our subsampling RNG; torch init left at upstream's "
+                          "manual_seed(0)",
             "inference_reference": "training-donor slices (pre-registered; test slice "
                                    "would leak its coordinate set)",
-            "coordinate_frame": "per-slice min-max [-0.5,0.5]; inverted with the test "
-                                "slice's own scaler",
+            "coordinate_frame": (
+                f"per-slice min-max [-0.5,0.5], {args.coord_frame}; inverted with "
+                f"the test slice's own scaler; artifacts in ORIGINAL microns"),
+            "coord_frame": args.coord_frame,
+            "artifact_frame": "original_microns",
+            "data_dir": str(data_dir),
+            "exclude_test_files": sorted(excl),
+            "feature_source": (f"obsm[{args.use_obsm!r}]" if args.use_obsm else ".X"),
+            "n_features": len(ref_var),
+            "reference_n_obs": ref_n_obs,
+            "reference_X_min": ref_xmin,
+            "reference_X_max": ref_xmax,
+            "query_chunk": args.query_chunk,
+            "torch_version": _torch_version(),
             "status": "incomplete",
             "per_slice": per_slice,
         }
@@ -551,35 +825,90 @@ def main(argv: Optional[List[str]] = None) -> int:
     for i, tf in enumerate(test_files, 1):
         label = section_label_from_filename(tf)
         LOG.info("[%d/%d] %s", i, len(test_files), label)
-        q_path, coords_true, cls, n_cells = build_query(ad_mod, tf, args, work)
-        recon = work / f"recon_{label}.h5ad"
-        cmd = [sys.executable, str(entry), "inference",
-               "--query_data_path", str(q_path),
-               "--model_folder", str(model_dir),
-               "--parameter_file_path", str(params_path),
-               "--ref_data_path", str(ref_path),
-               "--save_path", str(recon)]
-        run_cmd(cmd, cwd=repo, dry=args.dry_run)
         if args.dry_run:
+            # Don't read slices or write h5ads on a dry run — just show the shape
+            # of the command that would be issued.
+            LOG.info("$ (dry) %s inference --query_data_path %s ... --ref_data_path %s",
+                     sys.executable, work / f"query_{label}[_chunkK].h5ad", ref_path)
             continue
 
-        pred_norm = read_predicted_coords(ad_mod, recon, n_cells)
+        feats, coords_true, cls, obs_names, vn = load_query(ad_mod, tf, args)
+        n_cells = feats.shape[0]
+        # Cross-split panel check: upstream sys.exit()s if any train gene is
+        # absent from the query, and for the obsm path it synthesises positional
+        # names, so a WIDER test embedding would pass a subset test and upstream
+        # would silently use the first d_train columns.
+        if args.use_obsm:
+            if len(vn) != len(ref_var):
+                raise ValueError(
+                    f"{tf.name}: obsm[{args.use_obsm!r}] width {len(vn)} != train "
+                    f"width {len(ref_var)}; positional names would silently "
+                    f"misalign the features.")
+        else:
+            missing = [g for g in ref_var if g not in set(map(str, vn))]
+            if missing:
+                raise ValueError(
+                    f"{tf.name}: {len(missing)} training feature(s) absent from the "
+                    f"test panel (e.g. {missing[:5]}); upstream format_query would "
+                    f"sys.exit mid-run.")
+
+        bounds = chunk_bounds(n_cells, args.query_chunk)
+        peak = estimate_peak_bytes(max(b - a for a, b in bounds), ref_n_obs)
+        LOG.info("  n=%d  ref=%d  chunks=%d  est. peak %.1f GB",
+                 n_cells, ref_n_obs, len(bounds), peak / 1e9)
+        if args.max_mem_gb and peak > args.max_mem_gb * 1e9:
+            raise SystemExit(
+                f"[cellcontrast] {label}: estimated inference peak "
+                f"{peak/1e9:.1f} GB exceeds --max_mem_gb {args.max_mem_gb:.1f}. "
+                f"Lower --query_chunk (currently {args.query_chunk}) — the "
+                f"dominant term is 24*chunk*n_ref. Do NOT use --max_ref_cells "
+                f"for this: shrinking the reference changes the candidate "
+                f"position set, i.e. the method.")
+
+        preds = []
+        for ci, (lo_i, hi_i) in enumerate(bounds):
+            tag = label if len(bounds) == 1 else f"{label}_chunk{ci:03d}"
+            q_path = write_query_chunk(ad_mod, feats[lo_i:hi_i], vn, work, tag)
+            recon = work / f"recon_{tag}.h5ad"
+            cmd = [sys.executable, str(entry), "inference",
+                   "--query_data_path", str(q_path),
+                   "--model_folder", str(model_dir),
+                   "--parameter_file_path", str(params_path),
+                   "--ref_data_path", str(ref_path),
+                   "--save_path", str(recon)]
+            if len(bounds) > 1:
+                LOG.info("  chunk %d/%d rows [%d, %d)",
+                         ci + 1, len(bounds), lo_i, hi_i)
+            run_cmd(cmd, cwd=repo, dry=False)
+            preds.append(read_predicted_coords(ad_mod, recon, hi_i - lo_i))
+            for tmp in (recon, q_path):
+                try:
+                    tmp.unlink()     # recon holds a dense chunk x chunk matrix
+                except OSError:
+                    pass
+        pred_norm = np.vstack(preds)
+        if pred_norm.shape[0] != n_cells:
+            raise ValueError(f"{label}: concatenated {pred_norm.shape[0]} "
+                             f"predictions for {n_cells} cells")
+
         # Validate BEFORE writing artifacts: a bad readout must not reach the
         # scorer, where it is indistinguishable from a weak baseline. Also
         # reports the duplicate rate that top-1 copying necessarily produces
         # (never jitter it away — that would alter the method).
         uniq = check_predictions(pred_norm, ref_pairs, label)
-        # predictions are in the shared normalised frame -> back to this slice's microns
-        pred_orig = SliceCoordScaler().fit(coords_true).inverse_transform(pred_norm)
-        write_slice_artifacts(results / label, pred_orig, coords_true, cls)
+        # predictions are in the shared normalised frame -> back to this slice's
+        # microns, using the SAME frame convention the reference was built with.
+        scaler = SliceCoordScaler(
+            isotropic=(args.coord_frame == "isotropic")).fit(coords_true)
+        pred_orig = scaler.inverse_transform(pred_norm)
+        write_slice_artifacts(results / label, pred_orig, coords_true, cls,
+                              index=obs_names)
         LOG.info("  n=%d  distinct predicted positions=%d (%.1f%%)",
                  n_cells, uniq, 100.0 * uniq / n_cells)
         per_slice.append({"section": label, "n_cells": n_cells,
+                          "n_chunks": len(bounds),
+                          "est_peak_gb": round(peak / 1e9, 2),
                           "distinct_predicted_positions": uniq})
-        try:
-            recon.unlink()          # each holds a dense NxN similarity matrix
-        except OSError:
-            pass
 
     if args.dry_run:
         LOG.info("dry run complete")
@@ -594,6 +923,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     LOG.info("\nwrote %d slice(s) to %s", len(per_slice), results)
     LOG.info("next: score with compute_extended_metrics.py --methods cellcontrast")
     return 0
+
+
+def _torch_version() -> Optional[str]:
+    """Record which torch actually ran. Not cosmetic: the documented CPU escape
+    hatch TORCH_SPEC="torch" resolves to >=2.6 where torch.load defaults to
+    weights_only=True, and upstream stores a pandas Index in the checkpoint
+    (train.py:38) and loads it bare (inference.py:26-33) — that combination
+    fails at INFERENCE, after training has completed."""
+    try:
+        import torch
+        return str(torch.__version__)
+    except Exception:
+        return None
 
 
 def _git_commit(repo: Path) -> Optional[str]:

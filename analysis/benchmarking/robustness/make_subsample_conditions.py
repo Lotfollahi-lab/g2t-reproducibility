@@ -5,46 +5,52 @@ Reviewer R2 asks how robust G2T is to the number and relative abundance of
 profiled cells, since dissociated assays recover only a fraction of the cells
 present with cell-type-specific bias.
 
-DESIGN
-------
-Inference-only: no retraining. We reuse a trained checkpoint and vary only the
-cell set presented to the model.
+Inference-only: reuse a trained checkpoint and vary the cell set presented.
 
-A fixed evaluation set E is chosen per slice and is present in EVERY condition;
-only the *other* cells vary. All metrics are computed on E alone, so the
-evaluation set is identical across conditions and any change is attributable to
-the model's input rather than to measuring different cells.
+TWO MODES
+---------
+``--slice_fracs`` (PRIMARY, all-presented). Subsample each slice directly to a
+fraction of its cells and score EVERY presented cell. The condition label is the
+fraction, with no arithmetic to misread, and there is NO FLOOR -- 5% recovery is
+reachable, which is the regime a real dissociated assay operates in.
 
-We emit LUNA-format test CSVs rather than subsampled h5ads. run_scgg_inference.py
-accepts --train_csv/--test_csv directly, and in test_only mode the train CSV is
-never loaded (only stat()ed, and not even that with --n_genes), so pointing
---train_csv at the training run's existing work/train.csv skips all h5ad reading.
-One test.csv holds all 31 sections, so one inference run covers one condition.
+  Why this is primary. An earlier design held a fixed 20% evaluation set E
+  present in every condition and scored only E, to avoid comparing metrics
+  computed on different cell sets. That over-corrected. Per-cell Spearman of
+  pairwise-distance ranks has N-INVARIANT ENDPOINTS -- a perfect model scores 1
+  and a random one ~0 at any N -- so thinning the scored set adds variance, not
+  much bias, at N in the thousands. Meanwhile fixed-E cost a hard 20% floor,
+  answered a context question rather than the practical one, and diluted the
+  perturbation so much that the reconstruction plots looked unchanged.
+  The residual "metric vs N" concern is measured directly and for free by
+  score_subsample_robustness.py --control_from, which rescores the 100% run's
+  OWN predictions on random subsets: model fixed, so any movement there is pure
+  metric artifact, and the difference from the real conditions is the model
+  effect.
 
-TWO LABELLING TRAPS THIS SCRIPT AVOIDS
---------------------------------------
-1. Because E is in every condition, retention has a FLOOR at E's share. Keeping
-   25% of "the rest" presents 0.2 + 0.25*0.8 = 40% of the slice, not 25%. Every
-   condition is therefore labelled by the fraction of the slice ACTUALLY
-   presented, and the summary prints both numbers. Nothing below eval_frac is
-   reachable in the uniform arm.
-2. For the composition arm, E is drawn ONLY from non-target classes
-   (--eval_exclude_classes), so the target class can be taken to 0% without the
-   floor. Use one invocation per target class, each with its own E manifest, and
-   compare conditions within an arm only.
+``--uniform_fracs`` / ``--deplete_class`` (fixed-E, retained). Holds a
+class-stratified evaluation set E present in every condition and scores only E.
+Retained because it isolates a different question -- does surrounding context
+help place a FIXED set of cells -- and because earlier runs used it. Note the
+floor: keeping f of the non-E cells presents ``eval_frac + f*(1-eval_frac)`` of
+the slice, so at eval_frac=0.2 "rest010" presents 28%, not 10%. Conditions are
+labelled by fraction ACTUALLY presented in conditions.csv either way.
 
-USAGE (cell-number arm)
+Subsampling is plain uniform (not class-stratified), which is what unbiased
+recovery of a fraction of cells actually looks like, and matches the control.
+
+USAGE (primary)
     python make_subsample_conditions.py \
-        --test_csv  <train_run>/work/test.csv \
-        --out_dir   <ARTIFACTS>/robustness/arm_number \
-        --uniform_fracs 1.0,0.75,0.5,0.25,0.10 --seed 0
+        --test_csv <train_run>/work/test.csv \
+        --out_dir  <ARTIFACTS>/robustness/arm_depth \
+        --slice_fracs 1.0,0.9,0.8,0.7,0.6,0.5,0.25,0.10,0.05 --seed 0
 
-USAGE (composition arm, one target class)
+USAGE (composition arm; target can reach 0% because E excludes it)
     python make_subsample_conditions.py \
-        --test_csv  <train_run>/work/test.csv \
-        --out_dir   <ARTIFACTS>/robustness/arm_deplete_L5ET \
-        --eval_exclude_classes "L5 ET" \
-        --deplete_class "L5 ET" --deplete_levels 1.0,0.5,0.25,0.0 --seed 0
+        --test_csv <train_run>/work/test.csv \
+        --out_dir  <ARTIFACTS>/robustness/arm_deplete \
+        --eval_exclude_classes "L2/3 IT" --deplete_class "L2/3 IT" \
+        --deplete_levels 1.0,0.5,0.25,0.0 --uniform_fracs 1.0 --seed 0
 """
 
 from __future__ import annotations
@@ -63,12 +69,7 @@ META_COLS = ["coord_X", "coord_Y", "cell_section", "cell_class"]
 
 def stratified_eval_set(sub: pd.DataFrame, frac: float,
                         exclude_classes: set, rng) -> np.ndarray:
-    """Class-proportional random subset of one slice, as an index array.
-
-    Proportional (not min-1) so E's composition matches the slice: forcing rare
-    classes in would over-represent them. Classes in ``exclude_classes`` are
-    never eligible, which is what lets the composition arm deplete a class to 0.
-    """
+    """Class-proportional random subset of one slice (fixed-E mode only)."""
     picks = []
     for cls, g in sub.groupby("cell_class", sort=True):
         if str(cls) in exclude_classes:
@@ -83,21 +84,49 @@ def stratified_eval_set(sub: pd.DataFrame, frac: float,
     return np.sort(np.concatenate(picks))
 
 
+def write_condition(df: pd.DataFrame, keep: np.ndarray, out: Path, name: str,
+                    n_sections: int) -> dict:
+    """Write one condition's test.csv, with the guards that matter."""
+    cond_df = df.loc[np.sort(keep)]
+    per_slice = cond_df["cell_section"].astype(str).value_counts()
+    # data_module._generate_slice_indices has an off-by-one on the LAST section:
+    # a trailing section left with exactly one cell is absorbed into the previous
+    # graph, silently corrupting two slices' counts.
+    if int(per_slice.min()) <= 1:
+        raise SystemExit(f"{name}: a section has {per_slice.min()} cell(s); "
+                         f"raise the fraction or drop this condition")
+    if len(per_slice) != n_sections:
+        raise SystemExit(f"{name}: {len(per_slice)} sections, expected "
+                         f"{n_sections} — a slice vanished")
+    d = out / name
+    d.mkdir(parents=True, exist_ok=True)
+    cond_df.to_csv(d / "test.csv")
+    frac = len(cond_df) / len(df)
+    print(f"  {name:20s} n={len(cond_df):7d}  presented={100 * frac:5.1f}%  "
+          f"min_slice={int(per_slice.min())}")
+    return {"condition": name, "n_cells": len(cond_df),
+            "frac_of_slice_presented": round(frac, 4),
+            "min_slice_cells": int(per_slice.min())}
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--test_csv", required=True,
                    help="work/test.csv from the training run (all sections)")
     p.add_argument("--out_dir", required=True)
-    p.add_argument("--eval_frac", type=float, default=0.20)
+    p.add_argument("--slice_fracs", default="",
+                   help="PRIMARY MODE: fractions of each slice to present; every "
+                        "presented cell is scored. No evaluation set, no floor.")
+    p.add_argument("--eval_frac", type=float, default=0.20,
+                   help="fixed-E mode only: share of each slice held as E")
     p.add_argument("--eval_exclude_classes", default="",
-                   help="comma-separated cell_class values kept OUT of E")
-    p.add_argument("--uniform_fracs", default="1.0,0.75,0.5,0.25,0.10",
-                   help="fractions of the NON-E cells to retain, uniformly")
+                   help="fixed-E mode: comma-separated classes kept OUT of E")
+    p.add_argument("--uniform_fracs", default="",
+                   help="fixed-E mode: fractions of the NON-E cells to retain")
     p.add_argument("--deplete_class", default="",
-                   help="if set, also emit conditions depleting this class")
-    p.add_argument("--deplete_levels", default="1.0,0.5,0.25,0.0",
-                   help="fractions of --deplete_class to retain")
+                   help="fixed-E mode: also emit conditions depleting this class")
+    p.add_argument("--deplete_levels", default="1.0,0.5,0.25,0.0")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -110,95 +139,94 @@ def main() -> int:
     if missing:
         raise SystemExit(f"{args.test_csv} lacks required columns: {missing}")
     if df.index.duplicated().any():
-        raise SystemExit("duplicate cell_id values in the index — cannot key E")
+        raise SystemExit("duplicate cell_id values in the index — cannot key cells")
     n_genes = df.shape[1] - len(META_COLS)
-    excl = {s.strip() for s in args.eval_exclude_classes.split(",") if s.strip()}
     sections = sorted(df["cell_section"].astype(str).unique())
     print(f"{len(df)} cells, {n_genes} gene columns, {len(sections)} sections")
-    if excl:
-        print(f"classes excluded from E: {sorted(excl)}")
 
-    # ---- fixed evaluation set, one per slice -------------------------------
-    e_idx: dict[str, np.ndarray] = {}
-    for sec in sections:
-        sub = df[df["cell_section"].astype(str) == sec]
-        e_idx[sec] = stratified_eval_set(sub, args.eval_frac, excl, rng)
+    # Written in BOTH modes. The scorer needs it to recover a slice's identity
+    # from its cell ids: the written output directory name comes from a
+    # cell-COUNT lookup (test.py:242-249 mapping_dict[positions_pred.shape[0]]),
+    # which is not trustworthy once we change cell counts, and a collision would
+    # silently give two slices the same name. Also supplies cell_class for the
+    # per-class breakdown.
+    df[["cell_section", "cell_class"]].to_csv(out / "cell_index.csv")
 
-    e_rows = pd.concat([
-        df.loc[idx, ["cell_section", "cell_class"]] for idx in e_idx.values()
-    ])
-    e_rows.index.name = df.index.name or "cell_id"
-    e_rows.to_csv(out / "E_manifest.csv")
-    print(f"E: {len(e_rows)} cells "
-          f"({100.0 * len(e_rows) / len(df):.1f}% of the test split)")
+    slice_fracs = [float(s) for s in args.slice_fracs.split(",") if s.strip()]
+    uniform_fracs = [float(s) for s in args.uniform_fracs.split(",") if s.strip()]
+    if not slice_fracs and not uniform_fracs and not args.deplete_class:
+        raise SystemExit("give --slice_fracs (primary) or --uniform_fracs / "
+                         "--deplete_class (fixed-E mode)")
 
-    # ---- condition specs ---------------------------------------------------
-    conds: list[tuple[str, dict]] = []
-    for f in [float(s) for s in args.uniform_fracs.split(",") if s.strip()]:
-        conds.append((f"uniform_rest{int(round(f * 100)):03d}",
-                      {"kind": "uniform", "rest_frac": f}))
-    if args.deplete_class:
-        for f in [float(s) for s in args.deplete_levels.split(",") if s.strip()]:
-            conds.append((f"deplete_{int(round(f * 100)):03d}",
-                          {"kind": "deplete", "target": args.deplete_class,
-                           "target_frac": f}))
+    summary, mode = [], "all_presented" if slice_fracs else "fixed_eval"
 
-    summary = []
-    for name, spec in conds:
-        keep_all = []
+    # ---- PRIMARY: all-presented -------------------------------------------
+    for f in slice_fracs:
+        keep = []
         for sec in sections:
-            sub = df[df["cell_section"].astype(str) == sec]
-            e = e_idx[sec]
-            rest = sub.index.difference(pd.Index(e))
-            if spec["kind"] == "uniform":
-                n_take = int(round(spec["rest_frac"] * len(rest)))
-                sel = rng.choice(rest.to_numpy(), size=n_take, replace=False) \
-                    if n_take > 0 else np.array([], dtype=rest.dtype)
-            else:
-                is_t = sub.loc[rest, "cell_class"].astype(str) == spec["target"]
-                tgt, oth = rest[is_t.to_numpy()], rest[~is_t.to_numpy()]
-                n_take = int(round(spec["target_frac"] * len(tgt)))
-                sel = np.concatenate([
-                    oth.to_numpy(),
-                    rng.choice(tgt.to_numpy(), size=n_take, replace=False)
-                    if n_take > 0 else np.array([], dtype=tgt.dtype)])
-            keep_all.append(np.concatenate([e, sel]))
+            idx = df.index[df["cell_section"].astype(str) == sec].to_numpy()
+            n_take = int(round(f * len(idx)))
+            keep.append(rng.choice(idx, size=n_take, replace=False)
+                        if n_take > 0 else np.array([], dtype=idx.dtype))
+        summary.append(write_condition(
+            df, np.concatenate(keep), out,
+            f"slice{int(round(f * 100)):03d}", len(sections)))
 
-        keep = np.sort(np.concatenate(keep_all))
-        cond_df = df.loc[keep]
-        # Guard the last-section merge bug in data_module._generate_slice_indices:
-        # a trailing section with exactly one cell is absorbed into the previous
-        # graph, silently corrupting two slices' counts.
-        per_slice = cond_df["cell_section"].astype(str).value_counts()
-        if int(per_slice.min()) <= 1:
-            raise SystemExit(f"{name}: a section has {per_slice.min()} cell(s); "
-                             f"raise --eval_frac or drop this condition")
-        if len(per_slice) != len(sections):
-            raise SystemExit(f"{name}: {len(per_slice)} sections, expected "
-                             f"{len(sections)} — a slice vanished")
+    # ---- fixed-E mode ------------------------------------------------------
+    if uniform_fracs or args.deplete_class:
+        excl = {s.strip() for s in args.eval_exclude_classes.split(",") if s.strip()}
+        if excl:
+            print(f"classes excluded from E: {sorted(excl)}")
+        e_idx = {sec: stratified_eval_set(
+            df[df["cell_section"].astype(str) == sec], args.eval_frac, excl, rng)
+            for sec in sections}
+        e_rows = pd.concat([df.loc[i, ["cell_section", "cell_class"]]
+                            for i in e_idx.values()])
+        e_rows.index.name = df.index.name or "cell_id"
+        e_rows.to_csv(out / "E_manifest.csv")
+        print(f"E: {len(e_rows)} cells ({100 * len(e_rows) / len(df):.1f}% of split)")
 
-        d = out / name
-        d.mkdir(parents=True, exist_ok=True)
-        cond_df.to_csv(d / "test.csv")
-        frac_presented = len(cond_df) / len(df)
-        summary.append({"condition": name, **spec, "n_cells": len(cond_df),
-                        "frac_of_slice_presented": round(frac_presented, 4),
-                        "min_slice_cells": int(per_slice.min())})
-        print(f"  {name:22s} n={len(cond_df):7d}  "
-              f"presented={100 * frac_presented:5.1f}% of the split  "
-              f"min_slice={int(per_slice.min())}")
+        specs = [(f"uniform_rest{int(round(f * 100)):03d}", "uniform", f)
+                 for f in uniform_fracs]
+        if args.deplete_class:
+            specs += [(f"deplete_{int(round(f * 100)):03d}", "deplete", f)
+                      for f in [float(s) for s in args.deplete_levels.split(",")
+                                if s.strip()]]
+        for name, kind, f in specs:
+            keep = []
+            for sec in sections:
+                sub = df[df["cell_section"].astype(str) == sec]
+                e = e_idx[sec]
+                rest = sub.index.difference(pd.Index(e))
+                if kind == "uniform":
+                    k = int(round(f * len(rest)))
+                    sel = (rng.choice(rest.to_numpy(), size=k, replace=False)
+                           if k > 0 else np.array([], dtype=rest.dtype))
+                else:
+                    is_t = sub.loc[rest, "cell_class"].astype(str) == args.deplete_class
+                    tgt, oth = rest[is_t.to_numpy()], rest[~is_t.to_numpy()]
+                    k = int(round(f * len(tgt)))
+                    sel = np.concatenate([
+                        oth.to_numpy(),
+                        rng.choice(tgt.to_numpy(), size=k, replace=False)
+                        if k > 0 else np.array([], dtype=tgt.dtype)])
+                keep.append(np.concatenate([e, sel]))
+            summary.append(write_condition(df, np.concatenate(keep), out,
+                                           name, len(sections)))
 
     pd.DataFrame(summary).to_csv(out / "conditions.csv", index=False)
     (out / "spec.json").write_text(json.dumps({
         "test_csv": str(Path(args.test_csv).resolve()),
-        "eval_frac": args.eval_frac,
-        "eval_exclude_classes": sorted(excl),
-        "seed": args.seed, "n_genes": n_genes,
-        "n_sections": len(sections), "conditions": summary,
-        "note": "Report frac_of_slice_presented, not rest_frac: E is present in "
-                "every condition so retention is floored at eval_frac.",
+        "mode": mode, "seed": args.seed, "n_genes": n_genes,
+        "n_sections": len(sections), "n_cells_total": int(len(df)),
+        "eval_frac": args.eval_frac if mode == "fixed_eval" else None,
+        "conditions": summary,
+        "note": ("all_presented: every presented cell is scored; the condition "
+                 "label IS the presented fraction." if mode == "all_presented"
+                 else "fixed_eval: only E is scored; retention is floored at "
+                      "eval_frac, so report frac_of_slice_presented, not the label."),
     }, indent=2))
-    print(f"\nwrote {len(conds)} condition(s) + E_manifest.csv to {out}")
+    print(f"\nmode={mode}; wrote {len(summary)} condition(s) to {out}")
     print(f"n_genes for --n_genes: {n_genes}")
     return 0
 

@@ -6,34 +6,54 @@ Everything here is fixed by OUR side of the interface, so it is correct
 independently of what the two upstream packages expect internally. It gives:
 
   * the SAME split discovery the other baselines use  (``*_{train,test}.h5ad``)
-  * the SAME expression preprocessing                  (log2(1+x), see below)
-  * the SAME per-slice coordinate normalisation        ([-0.5, 0.5])
+  * per-slice coordinate normalisation into a shared frame (see SliceCoordScaler)
   * the EXACT artifact schema the metric code reads    (metadata_pred/true.csv)
 
-so that any numbers produced are directly comparable with LUNA, G2T and CeLEry
-rather than merely similar-looking.
-
 Data provenance (verified against the repo, not assumed):
-  * silver ``adata.X``          — LUNA's CSV values as-is, i.e. non-integer
-                                  PER-CELL-NORMALISED counts (not raw integers).
   * ``adata.obsm['spatial']``   — raw micron coordinates (fallback:
                                   ``obs['coord_X'|'coord_Y']``).
   * ``adata.obs['cell_class']`` — string cell-class labels.
-  * the model data path applies ``log2(1 + x)``
-    (``scgg/src/utils/data/load.py::log2_norm``) — that is the "log2-normalised
-    following LUNA" step in the paper.
+  * silver ``adata.X`` differs BY DATASET:
+      - ``mmc_luna``  : LUNA's published CSV gene block copied verbatim
+                        (``build_h5ad_from_luna_csv.py:211``). Non-integer,
+                        per-cell-scaled, count MAGNITUDE (max ~250) — i.e.
+                        linear space, NOT log space and NOT raw integers.
+      - ``cns_luna``  : the shared 600-d cross-platform latent, sitting in
+                        ``.X`` itself (both-sign). It is NOT in any ``obsm``
+                        key; the only ``obsm`` key on those h5ads is
+                        ``spatial``. Use ``--expression_mode silver_raw`` and
+                        do NOT pass ``--use_obsm``.
+      - ``dlpfc_visium`` / ``breast_janesick`` / ``cns_luna_raw`` : RAW integer
+                        counts. ``silver_raw`` is the correct mode there.
 
-FAIRNESS NOTE — read before changing ``expression_mode``.
-LUNA, G2T and CeLEry all consume log2(1+x) of the silver matrix. If an upstream
-package performs its own normalisation and expects counts, feeding it
-already-log2'd values would handicap it, and the resulting number would not be a
-fair report of that method. Hence ``expression_mode``:
-  * "log2"  (default) — parity with our other baselines.
-  * "silver_raw"      — hand over the silver matrix untouched and let the
-                        upstream package normalise as its authors intended.
-Whichever is used MUST be recorded in the run manifest and stated in any
-write-up. When in doubt, run both and report the better one for the baseline —
-never the worse.
+EXPRESSION MODE — the reasoning, because the previous version of this file got
+it backwards and the error propagated into the manuscript.
+``scgg/src/utils/data/load.py::log2_norm`` exists but has ZERO call sites in
+either repo. The actual transform each method applies to silver ``.X`` is:
+
+  | method        | transform on mmc_luna .X                                  |
+  |---------------|-----------------------------------------------------------|
+  | LUNA          | IDENTITY (``--log2_normalize`` defaults False)             |
+  | G2T / scgg    | IDENTITY (``prep.normalize`` defaults "none")             |
+  | CeLEry        | identity, then per-slice per-gene z-score (cel.get_zscore) |
+  | novosparc     | IDENTITY                                                  |
+  | CellContrast  | ``log2(1+x)``  (upstream itself normalises NOTHING)        |
+
+So ``log2`` is NOT "parity with the other baselines" — none of them log. It is
+chosen for FIDELITY TO CELLCONTRAST'S PAPER, whose methods state the input was
+"log-normalized gene expressions, calculated by scran"; ``scran::logNormCounts``
+is size-factor normalisation followed by log base 2, and silver mmc_luna ``.X``
+is already per-cell-scaled, so ``log2(1+x)`` composes to that same functional
+form. It is therefore the first and only log applied — NOT double-normalisation.
+
+  * "log2"       — the paper-faithful default for count-magnitude ``.X``.
+  * "silver_raw" — hand the matrix over untouched. REQUIRED for the CNS latent
+                   (both-sign) and correct for raw-count silver dirs.
+
+Report the log2 run as primary and any silver_raw run as a pre-registered
+ablation. Do NOT pick whichever scores higher after the fact — choosing
+preprocessing on the outcome is cherry-picking, even when it favours a baseline.
+Whichever is used MUST be recorded in the run manifest and stated in any write-up.
 """
 from __future__ import annotations
 
@@ -79,7 +99,17 @@ class SliceCoordScaler:
     Each slice has its own micron-scale bounding box, so coordinates are only
     comparable across slices after per-slice normalisation. Predictions are
     inverse-transformed back to the slice's own original scale before being
-    written out, because Sum RSSD is computed against original-scale truth.
+    written out, matching what CeLEry and novosparc write.
+
+    NOTE on frames, because an earlier version of this docstring was wrong:
+    LUNA/G2T write BOTH metadata CSVs in the per-slice [-0.5, 0.5] frame
+    (``data_module.py:51`` normalises truth at load; ``test.py:274``
+    re-normalises the prediction), whereas CeLEry, novosparc and CellContrast
+    write original microns. ``compute_kabsch_rssd`` fits a ROTATION ONLY
+    (``luna_metrics.py:662`` ``R.align_vectors``), so it is homogeneous of
+    degree 1 in coordinate scale and Sum RSSD is NOT comparable across those two
+    groups. That is a scorer-side issue, resolved in
+    ``compute_extended_metrics.py`` (``--rssd_frame``), not here.
 
     ``isotropic`` selects HOW the box is normalised. For CellContrast this is
     not cosmetic: upstream builds its k-nearest-neighbour positive graph with a
@@ -131,8 +161,10 @@ class SliceCoordScaler:
                 s = 1.0
             self.min_ = (c.max(axis=0) + self.min_) / 2.0 - s / 2.0
             span = np.full(2, s, dtype=np.float64)
-        # A degenerate axis (all cells share a value) would divide by zero;
-        # map it to the midpoint instead of producing inf/nan.
+        # A degenerate axis (all cells share a value) would divide by zero.
+        # Substituting span 1.0 sends that axis to ``lo`` (not the midpoint, as
+        # an earlier comment claimed) — a constant offset, which is harmless for
+        # every metric we compute but is worth stating accurately.
         self.span_ = np.where(span > 0, span, 1.0)
         return self
 
@@ -151,70 +183,6 @@ class SliceCoordScaler:
     def _check(self) -> None:
         if self.min_ is None or self.span_ is None:
             raise RuntimeError("SliceCoordScaler.fit must be called first")
-
-
-# ---------------------------------------------------------------------------
-# Slice loading (anndata imported lazily so this module imports without it)
-# ---------------------------------------------------------------------------
-def load_slice(
-    h5ad_path: Path,
-    expression_mode: str = "log2",
-) -> Dict[str, object]:
-    """Load one silver slice into plain arrays.
-
-    Returns a dict with keys: ``expr`` (n, g) float64, ``coords`` (n, 2) float64
-    ORIGINAL micron scale, ``cell_class`` (n,) str or None, ``obs_names`` (n,)
-    str, ``label`` str, ``var_names`` (g,) str.
-    """
-    if expression_mode not in ("log2", "silver_raw"):
-        raise ValueError("expression_mode must be 'log2' or 'silver_raw'")
-    try:
-        import anndata as ad
-    except Exception as exc:                          # pragma: no cover
-        raise RuntimeError(
-            "load_slice needs anndata; it is only available in the method envs "
-            "on the farm, not in the local checkout"
-        ) from exc
-
-    path = Path(h5ad_path)
-    adata = ad.read_h5ad(path)
-
-    X = adata.X
-    X = np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float64)
-    if expression_mode == "log2":
-        # matches scgg/src/utils/data/load.py::log2_norm
-        X = np.log2(1.0 + X)
-
-    obs = adata.obs
-    if "spatial" in adata.obsm:
-        spatial = np.asarray(adata.obsm["spatial"], dtype=np.float64)
-        if spatial.ndim != 2 or spatial.shape[1] < 2:
-            raise ValueError(f"{path}: obsm['spatial'] has shape {spatial.shape}")
-        coords = spatial[:, :2]
-    elif COL_X in obs.columns and COL_Y in obs.columns:
-        coords = np.column_stack([obs[COL_X].to_numpy(dtype=np.float64),
-                                  obs[COL_Y].to_numpy(dtype=np.float64)])
-    else:
-        raise ValueError(
-            f"{path}: no coordinates. Expected obsm['spatial'] or "
-            f"obs[{COL_X!r}/{COL_Y!r}]. obs cols: {list(obs.columns)[:10]}; "
-            f"obsm keys: {list(adata.obsm.keys())}"
-        )
-
-    cell_class = (obs[COL_CLASS].astype(str).to_numpy()
-                  if COL_CLASS in obs.columns else None)
-    label = (str(obs["cell_section"].iloc[0])
-             if "cell_section" in obs.columns and len(obs) else
-             section_label_from_filename(path))
-
-    return {
-        "expr": X,
-        "coords": coords,
-        "cell_class": cell_class,
-        "obs_names": np.asarray(adata.obs_names, dtype=object),
-        "label": label,
-        "var_names": np.asarray(adata.var_names, dtype=object),
-    }
 
 
 # ---------------------------------------------------------------------------

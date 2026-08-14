@@ -13,11 +13,18 @@
 #   With --skip_training the run timestamp is derived from the CHECKPOINT path
 #   (submit_pipeline.sh ~:505-512). Every condition uses the same checkpoint, so
 #   all of them would resolve to the SAME <ARTIFACTS>/<ds>/scgg_inference/<TS>/
-#   and silently overwrite each other. Worse, run_scgg_train.py:1896-1910 REUSES
-#   work/{train,test}.csv when present, so a second condition landing in a
-#   populated directory would re-score the FIRST condition's cells and report it
-#   as a new result. Pinning SCGG_ARTIFACTS_ROOT per (condition, seed) makes
-#   both failure modes impossible.
+#   and silently overwrite each other. Pinning SCGG_ARTIFACTS_ROOT per
+#   (condition, seed) makes that impossible.
+#
+#   An earlier version of this comment also blamed the work/{train,test}.csv
+#   reuse at run_scgg_train.py:1896-1910. That was WRONG on two counts, verified
+#   by reading the code: (a) that block sits in the --data_dir/h5ad branch and is
+#   unreachable when --train_csv/--test_csv are given (use_prebuilt at :1545,
+#   branch at :1698) -- the prebuilt path instead unlinks and recreates
+#   work/test.csv on every run (:1710-1720); and (b) work = out/"work" with
+#   out = Path(output_dir) (:1668-1671, :1689), so it is per-condition regardless.
+#   Recorded because a wrong justification in a comment is how a real hazard gets
+#   mis-diagnosed later.
 #
 # The scorer takes a per-run root and rglobs for metadata_pred.csv, so it does
 # not need to know the timestamp -- but that also means one root must contain
