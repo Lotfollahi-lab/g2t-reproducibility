@@ -183,16 +183,32 @@ def main() -> int:
     # ---- fixed-E mode ------------------------------------------------------
     if uniform_fracs or args.deplete_class:
         excl = {s.strip() for s in args.eval_exclude_classes.split(",") if s.strip()}
-        if excl:
-            print(f"classes excluded from E: {sorted(excl)}")
-        e_idx = {sec: stratified_eval_set(
-            df[df["cell_section"].astype(str) == sec], args.eval_frac, excl, rng)
-            for sec in sections}
-        e_rows = pd.concat([df.loc[i, ["cell_section", "cell_class"]]
-                            for i in e_idx.values()])
-        e_rows.index.name = df.index.name or "cell_id"
-        e_rows.to_csv(out / "E_manifest.csv")
-        print(f"E: {len(e_rows)} cells ({100 * len(e_rows) / len(df):.1f}% of split)")
+        if args.eval_frac <= 0:
+            # No evaluation set: every presented cell is scored, as in the
+            # --slice_fracs arm. Correct for depletion PROVIDED the scorer uses
+            # --control_from, because a class-targeted removal also removes those
+            # cells from the SCORED set, and per-class medians differ enough
+            # (0.28 to 0.72 across classes here) that the aggregate moves by
+            # composition arithmetic alone. The matched control removes exactly
+            # that: it rescores the reference run's own predictions on this
+            # condition's cell set, so the scored population is identical and only
+            # the model's INPUT differs.
+            e_idx = {sec: np.array([], dtype=df.index.dtype) for sec in sections}
+            mode = "all_presented"
+            print("eval_frac=0: no evaluation set; every presented cell is scored."
+                  "\n  -> score with --control_from <reference run> or the numbers "
+                  "are confounded by scored-set composition.")
+        else:
+            if excl:
+                print(f"classes excluded from E: {sorted(excl)}")
+            e_idx = {sec: stratified_eval_set(
+                df[df["cell_section"].astype(str) == sec], args.eval_frac, excl, rng)
+                for sec in sections}
+            e_rows = pd.concat([df.loc[i, ["cell_section", "cell_class"]]
+                                for i in e_idx.values()])
+            e_rows.index.name = df.index.name or "cell_id"
+            e_rows.to_csv(out / "E_manifest.csv")
+            print(f"E: {len(e_rows)} cells ({100 * len(e_rows) / len(df):.1f}% of split)")
 
         targets = {s.strip() for s in args.deplete_class.split(",") if s.strip()}
         if targets:
@@ -203,11 +219,12 @@ def main() -> int:
             n_t = int(df["cell_class"].astype(str).isin(targets).sum())
             print(f"depletion target(s) {sorted(targets)}: {n_t} cells "
                   f"({100 * n_t / len(df):.1f}% of the split)")
-            if not targets <= excl:
+            if args.eval_frac > 0 and not targets <= excl:
                 raise SystemExit(
                     "every --deplete_class must also be in --eval_exclude_classes, "
                     "or E will contain cells of the class you are depleting and the "
-                    "target can never fall below E's share.")
+                    "target can never fall below E's share. (Not needed with "
+                    "--eval_frac 0, where there is no E.)")
         specs = [(f"uniform_rest{int(round(f * 100)):03d}", "uniform", f)
                  for f in uniform_fracs]
         if targets:

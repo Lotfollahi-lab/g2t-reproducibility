@@ -21,18 +21,31 @@ per-axis standardise each over those cells, then score. For
 written = (raw - m)/R - 0.5, standardising gives (raw - mean(raw))/std(raw): the
 presented-set constants m and R cancel identically (verified to 3e-15).
 
-THE METRIC-vs-N CONTROL (--control_from)
----------------------------------------
-Scoring every presented cell means the scored set differs between conditions. Per
-cell Spearman of pairwise-distance ranks has N-invariant endpoints (perfect -> 1,
-random -> ~0 at any N), so this adds variance rather than much bias -- but that is
-an argument, and a number is better. --control_from rescores the 100% run's OWN
-predictions on random subsets matching each condition's size. The model is fixed,
-so any movement there is PURE METRIC ARTIFACT, and
+THE CONTROL (--control_from) -- REQUIRED, not optional
+------------------------------------------------------
+Scoring every presented cell means the scored SET differs between conditions, and
+that alone moves the aggregate for two reasons: (i) each cell's rho is computed
+against fewer other cells, and (ii) for a CLASS-TARGETED removal the scored
+population changes composition, which matters because per-class medians span
+0.28 to 0.72 in this benchmark -- depleting a class that scores above the median
+lowers the aggregate with no model effect whatsoever.
 
-    model effect = actual(f) - control(f)
+Both are removed by the MATCHED control: rescore the reference run's OWN
+predictions on EXACTLY the cells this condition scored. The reference model saw
+the full input, the scored set is identical, so
 
-is the quantity to report. Needs no GPU: it reuses artifacts already on disk.
+    model_effect = actual - control_matched
+
+isolates the model's response to the changed input. This is what makes it valid to
+score all presented cells instead of holding a fixed evaluation set, and it is why
+the fixed-set design (with its hard floor at eval_frac) is no longer needed.
+Needs no GPU -- it reuses artifacts already on disk. Every scored cell must exist
+in the reference run, so --control_from must be the condition presenting ALL cells;
+the code refuses otherwise.
+
+``resolution_sd`` additionally rescores random subsets of the same SIZE over a few
+draws. It is a resolution estimate only -- treat any |model_effect| below it as
+unresolvable -- not the anchor.
 
 Values here are NOT comparable to the published 31-slice Spearman: the scored set
 and the frame both differ. Compare conditions to each other only.
@@ -154,7 +167,7 @@ def main() -> int:
     else:
         print("scoring ALL presented cells in each condition")
 
-    rows, per_class = [], []
+    rows, per_class, scored_sets = [], [], {}
     n_expected = None
     for item in args.runs.split(","):
         if "=" not in item:
@@ -165,15 +178,17 @@ def main() -> int:
             n_expected = len(slices)
         elif len(slices) != n_expected:
             raise SystemExit(f"{name}: {len(slices)} slices, others had {n_expected}")
-        meds, n_tot = [], 0
+        meds, n_tot, scored = [], 0, {}
         for sec, (true, pred) in sorted(slices.items()):
             idx = pred.index if e_idx is None else e_idx[sec]
             rho = score_index(true, pred, idx, metric_fn)
             meds.append(float(np.median(rho)))
             n_tot += len(idx)
+            scored[sec] = idx          # for the MATCHED control below
             per_class.append(pd.DataFrame({
                 "condition": name, "cell_class": cls_of.reindex(idx).to_numpy(),
                 "rho": rho}))
+        scored_sets[name] = scored
         rows.append({"condition": name, "spearman_mean_of_medians": float(np.mean(meds)),
                      "n_slices": len(meds), "n_scored_cells": n_tot})
         print(f"  {name:14s} Spearman={rows[-1]['spearman_mean_of_medians']:.4f}  "
@@ -188,40 +203,66 @@ def main() -> int:
                                  for n in res["condition"]]
         frac = res["frac_presented"]
 
-    # ---- metric-vs-N control ------------------------------------------------
+    # ---- controls -----------------------------------------------------------
+    # MATCHED (primary): score the reference run's OWN predictions on exactly the
+    # cells this condition scored. Model saw the full input; scored set identical.
+    # So actual - matched isolates the model's response to the changed input, and
+    # it is correct even when removal is class-targeted (which shifts the scored
+    # population and would otherwise move the aggregate by composition alone).
+    # RANDOM (resolution only): random subsets of the same SIZE, repeated, giving
+    # an SD. Use it to judge what size of effect is resolvable, not as the anchor.
     if args.control_from:
         ref = collect_slices(Path(args.control_from), sec_of)
-        ref_n = {s: len(pr.index) for s, (_, pr) in ref.items()}
-        ctl = []
-        for i, r in res.iterrows():
+        matched, rnd = [], []
+        for _, r in res.iterrows():
+            name = r["condition"]
+            sc = scored_sets[name]
+            missing = [s for s in sc if s not in ref]
+            if missing:
+                raise SystemExit(f"{name}: sections {missing[:3]} absent from the "
+                                 f"reference run — is --control_from the 100% run?")
+            meds = []
+            for sec, idx in sorted(sc.items()):
+                rt, rp = ref[sec]
+                extra = idx.difference(rp.index)
+                if len(extra):
+                    raise SystemExit(
+                        f"{name}/{sec}: {len(extra)} scored cell(s) absent from the "
+                        f"reference run; --control_from must be the condition that "
+                        f"presents ALL cells.")
+                meds.append(float(np.median(score_index(rt, rp, idx, metric_fn))))
+            matched.append(float(np.mean(meds)))
+
             f = r.get("frac_presented", np.nan)
             if not np.isfinite(f):
-                ctl.append((np.nan, np.nan)); continue
+                rnd.append(np.nan); continue
             vals = []
             for rep in range(args.control_reps):
                 rng = np.random.default_rng(args.control_seed + 1000 * rep
                                             + int(round(f * 1e4)))
-                meds = []
-                for sec, (true, pred) in sorted(ref.items()):
-                    k = max(3, int(round(f * ref_n[sec])))
-                    sub = pd.Index(rng.choice(pred.index.to_numpy(),
-                                              size=min(k, ref_n[sec]),
+                m2 = []
+                for sec, (rt, rp) in sorted(ref.items()):
+                    k = min(len(rp.index), max(3, int(round(f * len(rp.index)))))
+                    sub = pd.Index(rng.choice(rp.index.to_numpy(), size=k,
                                               replace=False))
-                    meds.append(float(np.median(
-                        score_index(true, pred, sub, metric_fn))))
-                vals.append(float(np.mean(meds)))
-            ctl.append((float(np.mean(vals)), float(np.std(vals))))
-        res["control_metric_only"] = [c[0] for c in ctl]
-        res["control_sd"] = [c[1] for c in ctl]
-        res["model_effect"] = res["spearman_mean_of_medians"] - res["control_metric_only"]
+                    m2.append(float(np.median(score_index(rt, rp, sub, metric_fn))))
+                vals.append(float(np.mean(m2)))
+            rnd.append(float(np.std(vals)))
+        res["control_matched"] = matched
+        res["resolution_sd"] = rnd
+        res["model_effect"] = res["spearman_mean_of_medians"] - res["control_matched"]
 
     print("\n=== Spearman by condition ===")
     print(res.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
-    if "model_effect" in res:
-        print("\ncontrol_metric_only = the 100% run's OWN predictions rescored on "
-              "random subsets of the same size (model fixed).")
-        print("model_effect = actual - control. THIS is the robustness result; "
-              "anything within control_sd is not resolvable.")
+    if "model_effect" in res:  # noqa
+        print("\ncontrol_matched = the reference run's OWN predictions rescored on "
+              "EXACTLY the cells this condition scored. Model saw the full input, "
+              "scored set identical, so this absorbs both the metric-vs-N effect "
+              "and (crucially, for class-targeted removal) the change in scored-set "
+              "COMPOSITION.")
+        print("model_effect = actual - control_matched. THIS is the robustness "
+              "result. resolution_sd is the spread over random subsets of the same "
+              "size; treat any |model_effect| below it as unresolvable.")
 
     pc = pd.concat(per_class, ignore_index=True)
     tab = (pc.groupby(["condition", "cell_class"])["rho"]

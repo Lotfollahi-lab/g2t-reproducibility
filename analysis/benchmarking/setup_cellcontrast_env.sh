@@ -262,9 +262,13 @@ except Exception as e:
 # upstream never uses — it builds spatial positive pairs with sklearn's KDTree.
 # matplotlib.pyplot is imported at MODULE level by loadData.py, so it has to be
 # importable on a display-less node; force the headless backend as the farm's
-# jobs do implicitly.
-import matplotlib
-matplotlib.use("Agg")
+# jobs do implicitly. (Guarded: a missing matplotlib is already reported above,
+# and should not abort the remaining checks with a traceback.)
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+except Exception:
+    pass
 symbols = (
     ("sklearn.neighbors",        "KDTree",            "loadData.py:7, utils.py:6 (spatial positives)"),
     ("sklearn.metrics.pairwise", "cosine_similarity", "loadData.py:12, utils.py:2"),

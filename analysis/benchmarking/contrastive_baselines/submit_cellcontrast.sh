@@ -12,7 +12,7 @@
 #
 # The imaging-vs-spot parameter choice (the paper's k_nearest_positives: 80 vs
 # 20) and the normalisation mode are DERIVED from --dataset here, not left to the
-# runner's defaults — see the per-dataset table below. The runner independently
+# runner's defaults — see the per-dataset table in this script. The runner independently
 # re-checks both and refuses a mismatch; that duplication is deliberate.
 #
 # Usage:
@@ -52,7 +52,7 @@
 #                         default (3000) — that is the defensible choice for a
 #                         baseline. 1000 is ~3x faster and the paper says >1000
 #                         suffices, but it IS a deviation and is recorded.
-#   --expression_mode M   log2 | silver_raw. Default is PER DATASET (table below):
+#   --expression_mode M   log2 | silver_raw. Default is PER DATASET (see table):
 #                         log2(1+x) where silver X holds count-magnitude values,
 #                         silver_raw where the matrix must be handed over
 #                         untouched (the both-sign cns_luna latent, raw counts).
@@ -222,6 +222,10 @@ case "$DATASET" in
   dlpfc_visium)
     SC_FLAG="--no_single_cell"; K_POS=20; DEF_EXPR="silver_raw"
     DEF_CHUNK=8000; DEF_MEM=64000;  REF_HINT=40000 ;;
+  # Unreachable via the allow-list above; here so that adding a dataset there
+  # and forgetting this table fails with a sentence instead of "unbound variable".
+  *) echo "ERROR: '$DATASET' has no entry in the per-dataset table; add one." >&2
+     exit 3 ;;
 esac
 EXPRESSION_MODE="${EXPRESSION_MODE:-$DEF_EXPR}"
 QUERY_CHUNK="${QUERY_CHUNK:-$DEF_CHUNK}"
