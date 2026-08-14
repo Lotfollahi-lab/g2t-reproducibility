@@ -12,8 +12,11 @@
 #
 # The imaging-vs-spot parameter choice (the paper's k_nearest_positives: 80 vs
 # 20) and the normalisation mode are DERIVED from --dataset here, not left to the
-# runner's defaults — see the per-dataset table in this script. The runner independently
-# re-checks both and refuses a mismatch; that duplication is deliberate.
+# runner's defaults — see the per-dataset table in this script. The runner
+# re-derives the platform from the dataset name and refuses a mismatch, so that
+# one is checked twice on purpose; on the normalisation it can only catch the
+# UNDEFINED case (log2 on a both-sign matrix), which is why the wrong-but-defined
+# case is gated here.
 #
 # Usage:
 #   # 0) once: clone + env, then ALWAYS smoke-test before a real run
@@ -89,9 +92,9 @@
 #   --dry_run             print the bsub commands without submitting
 #
 # Env overrides: CELLCONTRAST_REPO, VENV_DIR, SCGG_ARTIFACTS_ROOT, LSF_GROUP,
-# LSF_QUEUE, MEM_MB, WALL, GPU_SPEC, EXCLUDE_TEST_FILES, and CORES (default 8:
-# the LSF slot count, also exported as OMP/MKL/OPENBLAS_NUM_THREADS in the job so
-# upstream's per-row argsort does not oversubscribe a shared node).
+# LSF_QUEUE, MEM_MB, WALL, GPU_SPEC, COORD_FRAME, EXCLUDE_TEST_FILES, and CORES
+# (default 8: the LSF slot count, also exported as OMP/MKL/OPENBLAS_NUM_THREADS in
+# the job so upstream's per-row argsort does not oversubscribe a shared node).
 # ------------------------------------------------------------------------------
 set -euo pipefail
 
@@ -110,8 +113,8 @@ EPOCHS=""
 USE_OBSM=""
 MAX_TRAIN_CELLS=""
 MAX_REF_CELLS=""
-# Empty means "take the per-dataset default from the table below". Anything set
-# here (flag or env) wins, except where a gate proves it wrong.
+# Empty means "take the per-dataset default from the table below"; a value passed
+# on the command line wins, except where a gate below proves it wrong.
 EXPRESSION_MODE=""
 COORD_FRAME="${COORD_FRAME:-isotropic}"
 QUERY_CHUNK=""
@@ -194,10 +197,10 @@ esac
 # we expect at inference); the runner recomputes the estimate from the REAL
 # reference and refuses if it busts --max_mem_gb.
 case "$DATASET" in
-  # MERFISH cortex. Silver .X holds per-cell-normalised count-magnitude values,
-  # so log2(1+x) composes into the paper's scran logNormCounts. Slices max out
-  # at ~5,235 cells — below any sane chunk size, so inference keeps taking the
-  # original single unchunked call.
+  # Imaging-resolution cortex. Silver .X holds per-cell-normalised
+  # count-magnitude values, so log2(1+x) composes into the paper's scran
+  # logNormCounts. Slices max out at ~5,235 cells — below the chunk size, so
+  # inference keeps taking the original single unchunked call (unchanged).
   mmc_luna)
     SC_FLAG="--single_cell";    K_POS=80; DEF_EXPR="log2"
     DEF_CHUNK=8000; DEF_MEM=128000; REF_HINT=160000 ;;
@@ -245,6 +248,20 @@ case "$COORD_FRAME" in
 esac
 [[ "$QUERY_CHUNK" =~ ^[0-9]+$ ]] || {
   echo "ERROR: --query_chunk must be a non-negative integer (got '$QUERY_CHUNK')." >&2
+  exit 2; }
+# Both feed arithmetic below (and bsub -M), so a typo would otherwise become a
+# shell arithmetic error mid-script.
+[[ "$MEM_MB" =~ ^[0-9]+$ ]] || {
+  echo "ERROR: --mem must be an integer number of MB (got '$MEM_MB')." >&2
+  exit 2; }
+[[ -z "$MAX_MEM_GB" || "$MAX_MEM_GB" =~ ^[0-9]+(\.[0-9]+)?$ ]] || {
+  echo "ERROR: --max_mem_gb must be a number of GB (got '$MAX_MEM_GB')." >&2
+  exit 2; }
+# --max_ref_cells is the reference size R in the estimate below, so it feeds the
+# same arithmetic: a non-numeric value becomes a bare bash arithmetic error, and
+# 0 or a negative one makes the estimate meaningless while still submitting.
+[[ -z "$MAX_REF_CELLS" || "$MAX_REF_CELLS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "ERROR: --max_ref_cells must be a positive integer (got '$MAX_REF_CELLS')." >&2
   exit 2; }
 
 # The CNS latent is in .X, NOT in an obsm key: the only obsm key on those h5ads
@@ -295,8 +312,8 @@ if [[ "$EXPRESSION_MODE" == "log2" && "$DEF_EXPR" == "silver_raw" ]]; then
   echo "         size-factor normalisation), so this is a deviation from both" >&2
   echo "         the paper and the dataset default (silver_raw)." >&2
 fi
-# Same reasoning as the obsm gates: scoring a different set of test sections than the
-# other three methods is not a comparable number, so refuse rather than warn.
+# Same reasoning as the obsm gates: scoring a different set of test sections
+# than the other three methods is not a comparable number, so refuse, not warn.
 if [[ "$DATASET" == "cns_luna" && -z "$EXCLUDE_TEST_FILES" && -z "$SMOKE" ]]; then
   cat >&2 <<'EOF'
 ERROR: --exclude_test_files is required for cns_luna.
@@ -319,8 +336,13 @@ fi
 # the gate above exists to prevent. Warn rather than fail: --data_dir may point
 # at a staging copy, and the runner is the authority on what it finds.
 # (Unquoted expansion on purpose: it splits on the commas we substitute AND on
-# stray whitespace, matching the runner's per-entry .strip().)
+# stray whitespace, matching the runner's per-entry .strip(). 'set -f' for the
+# loop only, because we want the SPLITTING but not the globbing: with globbing on,
+# an entry like '*_test.h5ad' expanded against the CURRENT directory and the
+# warning then named a file the user never typed, hiding the real problem — the
+# runner has no glob support, so such an entry excludes nothing.)
 if [[ -n "$EXCLUDE_TEST_FILES" ]]; then
+  set -f
   for _x in ${EXCLUDE_TEST_FILES//,/ }; do
     if [[ ! -f "$DATA_DIR/$_x" ]]; then
       echo "WARNING: --exclude_test_files entry '$_x' is not in $DATA_DIR." >&2
@@ -329,6 +351,7 @@ if [[ -n "$EXCLUDE_TEST_FILES" ]]; then
       echo "         G2T/LUNA/CeLEry. Check: ls $DATA_DIR/*_test.h5ad" >&2
     fi
   done
+  set +f
 fi
 if [[ -n "$SMOKE" ]]; then
   # Small chunks as well as small resources: the runner's smoke path takes 2
@@ -355,19 +378,40 @@ fi
 # 15% of the LSF reservation back for torch, the loaded AnnData objects and the
 # interpreter, which the formula does not count.
 REF_EST="${MAX_REF_CELLS:-$REF_HINT}"
-MAX_MEM_GB="${MAX_MEM_GB:-$(( MEM_MB * 85 / 100000 ))}"
+# BUDGET_SRC exists so the messages below name where the budget actually came
+# from: they used to assert '85% of the LSF reservation' even when the number was
+# an explicit --max_mem_gb, which sent the reader to the wrong knob.
+if [[ -n "$MAX_MEM_GB" ]]; then
+  BUDGET_SRC="--max_mem_gb"
+else
+  MAX_MEM_GB=$(( MEM_MB * 85 / 100000 ))
+  BUDGET_SRC="85% of the ${MEM_MB}MB LSF reservation"
+fi
+# Whole GB for the shell-side comparison only: [[ -gt ]] is integer arithmetic,
+# and a fractional --max_mem_gb there is a syntax error that quietly evaluates
+# FALSE, i.e. it would disable the check it looks like it performs. The runner
+# still receives the exact value.
+BUDGET_GB="${MAX_MEM_GB%%.*}"; BUDGET_GB="${BUDGET_GB:-0}"
+if [[ "$BUDGET_GB" -lt 1 ]]; then
+  echo "ERROR: the inference memory budget rounds down to ${BUDGET_GB}GB" >&2
+  echo "       (${MAX_MEM_GB}GB, from ${BUDGET_SRC})." >&2
+  echo "       The runner treats 0 as 'no budget'" >&2
+  echo "       and skips the check, and nothing here runs in under 1GB." >&2
+  echo "       Raise --mem (or --max_mem_gb)." >&2
+  exit 2
+fi
 if [[ "$QUERY_CHUNK" -gt 0 ]]; then
   _A=$(( 24 * QUERY_CHUNK * QUERY_CHUNK ))
   _B=$(( 16 * QUERY_CHUNK * QUERY_CHUNK + 24 * QUERY_CHUNK * REF_EST ))
   EST_GB=$(( ( (_A > _B ? _A : _B) + 999999999 ) / 1000000000 ))
   EST_NOTE="<=${EST_GB}GB (ref ${REF_EST})"
-  if [[ "$EST_GB" -gt "$MAX_MEM_GB" ]]; then
+  if [[ "$EST_GB" -gt "$BUDGET_GB" ]]; then
     # Hard error only when R is exact (--max_ref_cells given); with REF_HINT the
     # number is our guess, so warn and let the runner do the authoritative check
     # against the reference it actually builds.
     if [[ -n "$MAX_REF_CELLS" ]]; then _LVL=ERROR; else _LVL=WARNING; fi
     echo "$_LVL: estimated inference peak ${EST_GB}GB exceeds the ${MAX_MEM_GB}GB" >&2
-    echo "    budget (85% of the ${MEM_MB}MB LSF reservation), with reference" >&2
+    echo "    budget (${BUDGET_SRC}), with reference" >&2
     echo "    size ${REF_EST}${MAX_REF_CELLS:+ (exact, --max_ref_cells)}." >&2
     echo "    Lower --query_chunk (the peak is linear in it), cap the reference" >&2
     echo "    with --max_ref_cells, or raise --mem." >&2
@@ -392,7 +436,10 @@ echo "venv    : $VENV_DIR"
 echo "seeds   : $SEEDS"
 echo "epochs  : ${EPOCHS:-<upstream default 3000>}"
 echo "platform: $SC_FLAG  (k_nearest_positives=$K_POS, derived from the dataset)"
-echo "features: ${USE_OBSM:+obsm['$USE_OBSM']}${USE_OBSM:-.X}, expression_mode $EXPRESSION_MODE"
+# Two steps, not one nested expansion: '${USE_OBSM:+...}${USE_OBSM:-.X}' printed
+# the key TWICE when it was set, because ':-' yields the value, not the fallback.
+FEATURE_SRC="${USE_OBSM:+obsm['$USE_OBSM']}"; FEATURE_SRC="${FEATURE_SRC:-.X}"
+echo "features: $FEATURE_SRC, expression_mode $EXPRESSION_MODE"
 echo "frame   : $COORD_FRAME"
 echo "memory  : chunk $QUERY_CHUNK, est peak $EST_NOTE, runner budget ${MAX_MEM_GB}GB"
 echo "excl    : ${EXCLUDE_TEST_FILES:-<none: all *_test.h5ad scored>}"

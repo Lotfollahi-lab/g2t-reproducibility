@@ -114,8 +114,14 @@ if [[ "$SKIP_CLONE" != "1" ]]; then
         # reproducibility claim, and a dirty tree makes .checked_out_commit a
         # lie about the code that actually ran. Our own droppings in the clone
         # (.checked_out_commit) are expected; nothing else is.
-        DIRTY="$(git -C "$REPO_DIR" status --porcelain \
-                 | grep -v -e '^?? \.checked_out_commit$' || true)"
+        # (Two steps so that a failing `git status` aborts under set -e instead
+        # of being read as "clean" by the filter below.)
+        STATUS="$(git -C "$REPO_DIR" status --porcelain)"
+        DIRTY=""
+        if [[ -n "$STATUS" ]]; then
+            DIRTY="$(printf '%s\n' "$STATUS" \
+                     | grep -v -e '^?? \.checked_out_commit$' || true)"
+        fi
         if [[ -n "$DIRTY" ]]; then
             log "ERROR: working tree at $REPO_DIR has local changes:"
             printf '%s\n' "$DIRTY" >&2
@@ -157,12 +163,16 @@ else
     log "SKIP_CLONE=1 (using existing $REPO_DIR, commit $COMMIT)"
 fi
 
-for f in cellContrast.py parameters/parameters_singleCell.json LICENSE; do
+# Both parameter files, not just the imaging one: the runner picks
+# parameters_spot.json for --no_single_cell (k=20), which dlpfc_visium requires,
+# and a missing file would otherwise only surface inside the LSF job.
+for f in cellContrast.py parameters/parameters_singleCell.json \
+         parameters/parameters_spot.json LICENSE; do
     if [[ ! -e "$REPO_DIR/$f" ]]; then
         log "ERROR: expected '$f' under $REPO_DIR"; exit 1
     fi
 done
-log "sanity: entry point, parameter file and LICENSE present"
+log "sanity: entry point, both parameter files and LICENSE present"
 
 # ---------------------------------------------------------------------------
 # 2. Create / refresh the uv venv
@@ -333,14 +343,30 @@ PY
 #    hence the header lines below.
 # ---------------------------------------------------------------------------
 LOCKFILE="${LOCKFILE:-$VENV_DIR/requirements.lock}"
+# The freeze records the CUDA build as a LOCAL version (torch==2.5.1+cu121),
+# which exists only on the PyTorch index — so a recreate line without that index
+# cannot resolve, and the "copy-pasteable" comment below would be a lie. It goes
+# in as --extra-index-url rather than the --index-url we install torch with:
+# --index-url REPLACES PyPI, and scanpy/anndata/... are not on the PyTorch index.
+RECREATE_EXTRA=""
+_want_url=0
+for _tok in "${TORCH_ARGS[@]}"; do
+    if (( _want_url )); then
+        RECREATE_EXTRA="$RECREATE_EXTRA --extra-index-url $_tok"; _want_url=0
+    elif [[ "$_tok" == --index-url || "$_tok" == --extra-index-url ]]; then
+        _want_url=1
+    elif [[ "$_tok" == --index-url=* || "$_tok" == --extra-index-url=* ]]; then
+        RECREATE_EXTRA="$RECREATE_EXTRA --extra-index-url ${_tok#*=}"
+    fi
+done
 {
     printf '# CellContrast baseline env, resolved %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf '# upstream commit : %s\n' "$COMMIT"
     printf '# python          : %s\n' "$PYTHON_VERSION"
     printf '# torch requested : %s\n' "${TORCH_ARGS[*]}"
     printf '# scanpy / numpy  : scanpy==%s , %s\n' "$SCANPY_VERSION" "$NUMPY_SPEC"
-    printf '# recreate        : uv venv --python %s <venv> && uv pip install --python <venv>/bin/python -r %s\n' \
-        "$PYTHON_VERSION" "$LOCKFILE"
+    printf '# recreate        : uv venv --python %s <venv> && uv pip install --python <venv>/bin/python -r %s%s\n' \
+        "$PYTHON_VERSION" "$LOCKFILE" "$RECREATE_EXTRA"
 } > "$LOCKFILE"
 uv pip freeze --python "$VENV_DIR/bin/python" >> "$LOCKFILE"
 log "lockfile: $LOCKFILE ($(grep -cv '^#' "$LOCKFILE" || true) pinned packages)"

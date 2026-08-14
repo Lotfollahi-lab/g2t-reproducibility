@@ -213,7 +213,7 @@ def main() -> int:
     # an SD. Use it to judge what size of effect is resolvable, not as the anchor.
     if args.control_from:
         ref = collect_slices(Path(args.control_from), sec_of)
-        matched, rnd = [], []
+        matched, rnd, per_class_ctl = [], [], []
         for _, r in res.iterrows():
             name = r["condition"]
             sc = scored_sets[name]
@@ -230,7 +230,17 @@ def main() -> int:
                         f"{name}/{sec}: {len(extra)} scored cell(s) absent from the "
                         f"reference run; --control_from must be the condition that "
                         f"presents ALL cells.")
-                meds.append(float(np.median(score_index(rt, rp, idx, metric_fn))))
+                rho_c = score_index(rt, rp, idx, metric_fn)
+                meds.append(float(np.median(rho_c)))
+                # Per-class control. Essential, not decorative: a class-targeted
+                # removal thins the neighbourhood of nearby classes MOST, so the
+                # metric artifact is largest exactly where a "neighbouring cell
+                # types suffer" signal would appear. Only the corrected
+                # difference can distinguish the two.
+                per_class_ctl.append(pd.DataFrame({
+                    "condition": name,
+                    "cell_class": cls_of.reindex(idx).to_numpy(),
+                    "rho_ctl": rho_c}))
             matched.append(float(np.mean(meds)))
 
             f = r.get("frac_presented", np.nan)
@@ -267,9 +277,26 @@ def main() -> int:
     pc = pd.concat(per_class, ignore_index=True)
     tab = (pc.groupby(["condition", "cell_class"])["rho"]
              .agg(median="median", n="size").reset_index())
-    print("\n=== per-class Spearman (median over that class's scored cells) ===")
+    print("\n=== per-class Spearman, RAW (median over that class's scored cells) ===")
     print(tab.pivot(index="cell_class", columns="condition", values="median")
              .to_string(float_format=lambda v: f"{v:.4f}"))
+
+    if args.control_from and per_class_ctl:
+        ct = (pd.concat(per_class_ctl, ignore_index=True)
+                .groupby(["condition", "cell_class"])["rho_ctl"].median()
+                .reset_index())
+        eff = tab.merge(ct, on=["condition", "cell_class"], how="inner")
+        eff["model_effect"] = eff["median"] - eff["rho_ctl"]
+        print("\n=== per-class MODEL EFFECT (raw - matched control) ===")
+        print("Do NOT read the raw table above for a per-class claim: removing a "
+              "class thins its neighbours' local neighbourhoods most, so the metric "
+              "artifact peaks exactly where a 'neighbouring types suffer' signal "
+              "would. Only these corrected values separate the two.")
+        print(eff.pivot(index="cell_class", columns="condition",
+                        values="model_effect")
+                 .to_string(float_format=lambda v: f"{v:+.4f}"))
+        tab = tab.merge(eff[["condition", "cell_class", "rho_ctl", "model_effect"]],
+                        on=["condition", "cell_class"], how="left")
 
     print("\nNOTE: not comparable to the published 31-slice Spearman — different "
           "scored set and frame. Compare conditions to each other only.")
