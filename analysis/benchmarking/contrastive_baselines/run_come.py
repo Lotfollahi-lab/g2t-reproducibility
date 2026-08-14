@@ -497,12 +497,23 @@ def fit_come(come_mods, ref_X, ref_cls, qry_X, qry_cls, args, work: Path,
     return C
 
 
-def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray):
+def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray,
+                            allow_degenerate: bool = False):
     """Assign each cell the coordinates of its highest-coefficient spot.
 
     This is upstream's own assignment rule: ``Model.cross_mask`` selects
     ``Coefficient.max(dim=0)`` -- per cell (column), the argmax over spots
     (rows). Returns (coords, n_distinct).
+
+    ``allow_degenerate`` downgrades the total-collapse check from a raise to a
+    warning. Set it ONLY for smoke tests: upstream initialises
+    ``MapNet.Coefficient`` to a UNIFORM constant (``torch.ones((n, m)) / (n*m)``,
+    model.py:48), so after the handful of epochs a smoke test runs, every column
+    is still near-constant and the argmax degenerates to one spot for all cells.
+    That is the expected outcome of a 2-epoch fit, not a defect, and blocking on
+    it prevents the smoke test from exercising the artifact-writing path it
+    exists to test. For a real run the collapse check MUST stay fatal -- scoring
+    a collapsed mapping would report a degenerate model as a method result.
     """
     if C.ndim != 2:
         raise ValueError(f"Coefficient must be 2-D; got {C.shape}")
@@ -517,9 +528,17 @@ def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray):
     xy = ref_xy[idx]
     n_distinct = len({(round(float(a), 9), round(float(b), 9)) for a, b in xy})
     if n_distinct == 1:
-        raise ValueError(
-            f"all {n_cells} cells mapped to a single spot — a degenerate fit. "
-            f"Scoring this would report a collapsed model as a method result.")
+        msg = (f"all {n_cells} cells mapped to a single spot — a degenerate "
+               f"fit. Coefficient is initialised UNIFORM (model.py:48), so this "
+               f"is the expected result of a very short fit and a real signal "
+               f"of non-convergence in a full one.")
+        if not allow_degenerate:
+            raise ValueError(
+                msg + " Scoring it would report a collapsed model as a method "
+                "result. (If this IS a smoke test, the wrapper downgrades this "
+                "to a warning automatically.)")
+        LOG.warning("  %s Continuing because this is a smoke test — its numbers "
+                    "must never be reported.", msg)
     return xy, n_distinct
 
 
@@ -675,7 +694,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             come_mods = _import_come(repo)
         C = fit_come(come_mods, ref_X, ref_cls, feats, cls, args, work,
                      tag=f"{dataset}_{label}_s{args.seed}")
-        pred_norm, n_distinct = coords_from_coefficient(C, ref_xy)
+        pred_norm, n_distinct = coords_from_coefficient(
+            C, ref_xy, allow_degenerate=args.smoke_test)
         # Read-out is in the shared normalised frame -> this slice's microns.
         pred_orig = (SliceCoordScaler(isotropic=True).fit(coords_true)
                      .inverse_transform(pred_norm))

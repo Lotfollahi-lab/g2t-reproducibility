@@ -80,7 +80,22 @@ check(all(tuple(r) in ref_set for r in xy.tolist()),
 print("\n[2] degenerate and invalid fits must raise")
 collapsed = np.zeros((4, 5)); collapsed[1, :] = 1.0        # every cell -> spot 1
 expect_raises(lambda: C.coords_from_coefficient(collapsed, ref_xy), ValueError,
-              "total collapse onto one spot raises")
+              "total collapse onto one spot raises for a REAL run")
+# ...but a smoke test must be allowed through: Coefficient starts UNIFORM
+# (model.py:48), so a 2-epoch fit collapses by construction and blocking would
+# stop the smoke test before it exercises artifact writing.
+xy_c, nd_c = C.coords_from_coefficient(collapsed, ref_xy, allow_degenerate=True)
+check(nd_c == 1 and xy_c.shape == (5, 2),
+      "collapse is a WARNING under allow_degenerate (smoke path continues)",
+      f"n_distinct={nd_c}")
+# A uniform Coefficient is exactly what upstream initialises, and it must
+# reproduce the collapse we saw on the farm.
+uniform = np.full((4, 5), 1.0 / 20)
+xy_u, nd_u = C.coords_from_coefficient(uniform, ref_xy, allow_degenerate=True)
+check(nd_u == 1, "uniform Coefficient (upstream's init) collapses to one spot",
+      f"n_distinct={nd_u}")
+check(np.array_equal(xy_u, np.repeat(ref_xy[:1], 5, axis=0)),
+      "uniform init maps every cell to spot 0 (argmax first-maximal tie-break)")
 nan_mat = C_mat.copy(); nan_mat[0, 0] = np.nan
 expect_raises(lambda: C.coords_from_coefficient(nan_mat, ref_xy), ValueError,
               "NaN in Coefficient raises (diverged fit)")
