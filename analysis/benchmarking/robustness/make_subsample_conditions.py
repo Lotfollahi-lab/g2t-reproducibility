@@ -124,8 +124,16 @@ def main() -> int:
                    help="fixed-E mode: comma-separated classes kept OUT of E")
     p.add_argument("--uniform_fracs", default="",
                    help="fixed-E mode: fractions of the NON-E cells to retain")
-    p.add_argument("--deplete_class", default="",
-                   help="fixed-E mode: also emit conditions depleting this class")
+    p.add_argument("--deplete_class", "--deplete_classes", dest="deplete_class",
+                   default="",
+                   help="fixed-E mode: comma-separated cell_class values to "
+                        "deplete TOGETHER as one block. A block is often what the "
+                        "literature actually supports: Tasic et al. 2018 (Nature "
+                        "563:72-78, Methods) report poor isolation survival for "
+                        "'L5 types' via Rbp4-Cre, which labels L5 IT and L5 ET "
+                        "together, not L5 ET alone. Depleting the block also gives "
+                        "a spatially structured (layer-restricted) perturbation, "
+                        "which uniform thinning cannot produce.")
     p.add_argument("--deplete_levels", default="1.0,0.5,0.25,0.0")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
@@ -186,9 +194,23 @@ def main() -> int:
         e_rows.to_csv(out / "E_manifest.csv")
         print(f"E: {len(e_rows)} cells ({100 * len(e_rows) / len(df):.1f}% of split)")
 
+        targets = {s.strip() for s in args.deplete_class.split(",") if s.strip()}
+        if targets:
+            unknown = targets - set(df["cell_class"].astype(str).unique())
+            if unknown:
+                raise SystemExit(f"--deplete_class names absent from the data: "
+                                 f"{sorted(unknown)}")
+            n_t = int(df["cell_class"].astype(str).isin(targets).sum())
+            print(f"depletion target(s) {sorted(targets)}: {n_t} cells "
+                  f"({100 * n_t / len(df):.1f}% of the split)")
+            if not targets <= excl:
+                raise SystemExit(
+                    "every --deplete_class must also be in --eval_exclude_classes, "
+                    "or E will contain cells of the class you are depleting and the "
+                    "target can never fall below E's share.")
         specs = [(f"uniform_rest{int(round(f * 100)):03d}", "uniform", f)
                  for f in uniform_fracs]
-        if args.deplete_class:
+        if targets:
             specs += [(f"deplete_{int(round(f * 100)):03d}", "deplete", f)
                       for f in [float(s) for s in args.deplete_levels.split(",")
                                 if s.strip()]]
@@ -203,7 +225,7 @@ def main() -> int:
                     sel = (rng.choice(rest.to_numpy(), size=k, replace=False)
                            if k > 0 else np.array([], dtype=rest.dtype))
                 else:
-                    is_t = sub.loc[rest, "cell_class"].astype(str) == args.deplete_class
+                    is_t = sub.loc[rest, "cell_class"].astype(str).isin(targets)
                     tgt, oth = rest[is_t.to_numpy()], rest[~is_t.to_numpy()]
                     k = int(round(f * len(tgt)))
                     sel = np.concatenate([

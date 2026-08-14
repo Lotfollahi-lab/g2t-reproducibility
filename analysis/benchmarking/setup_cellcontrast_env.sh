@@ -110,17 +110,51 @@ if [[ "$SKIP_CLONE" != "1" ]]; then
     if [[ -d "$REPO_DIR/.git" ]]; then
         log "repo exists: $REPO_DIR (fetching)"
         git -C "$REPO_DIR" fetch --all --tags --quiet
+        # Refuse to check out over local edits: the pinned sha is the whole
+        # reproducibility claim, and a dirty tree makes .checked_out_commit a
+        # lie about the code that actually ran. Our own droppings in the clone
+        # (.checked_out_commit) are expected; nothing else is.
+        DIRTY="$(git -C "$REPO_DIR" status --porcelain \
+                 | grep -v -e '^?? \.checked_out_commit$' || true)"
+        if [[ -n "$DIRTY" ]]; then
+            log "ERROR: working tree at $REPO_DIR has local changes:"
+            printf '%s\n' "$DIRTY" >&2
+            cat >&2 <<EOF
+Not checking out $REPO_COMMIT on top of them. Either discard the changes
+    git -C $REPO_DIR checkout -- . && git -C $REPO_DIR clean -fd
+and re-run, or keep them on purpose and re-run with
+    SKIP_CLONE=1 bash $0
+which leaves the tree untouched and skips the pinned checkout (the env is then
+NOT reproducible from the recorded commit — say so in the methods).
+EOF
+            exit 1
+        fi
     else
         log "cloning $REPO_URL -> $REPO_DIR"
         mkdir -p "$(dirname "$REPO_DIR")"
         git clone --quiet "$REPO_URL" "$REPO_DIR"
+    fi
+    # Fetching and RECORDING HEAD was not enough: without a checkout the code on
+    # disk is whatever main pointed at on the day of the run.
+    if [[ ! "$REPO_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+        log "WARNING: REPO_COMMIT='$REPO_COMMIT' is not a full 40-char sha."
+        log "         Branches and tags move; this run may not be reproducible."
+    fi
+    log "checking out pinned revision $REPO_COMMIT (detached HEAD) ..."
+    if ! git -C "$REPO_DIR" checkout --detach --quiet "$REPO_COMMIT"; then
+        log "ERROR: cannot check out '$REPO_COMMIT' in $REPO_DIR."
+        log "  If upstream rewrote history, pick a revision from"
+        log "  https://github.com/HKU-BAL/CellContrast/commits and re-run with"
+        log "  REPO_COMMIT=<sha> bash $0   (then update the default in this file)"
+        exit 1
     fi
     COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
     log "commit: $COMMIT"
     # A baseline we did not author must be reproducible to a revision.
     printf '%s\n' "$COMMIT" > "$REPO_DIR/.checked_out_commit"
 else
-    log "SKIP_CLONE=1 (using existing $REPO_DIR)"
+    COMMIT="$(cat "$REPO_DIR/.checked_out_commit" 2>/dev/null || echo unknown)"
+    log "SKIP_CLONE=1 (using existing $REPO_DIR, commit $COMMIT)"
 fi
 
 for f in cellContrast.py parameters/parameters_singleCell.json LICENSE; do
@@ -154,9 +188,19 @@ UV_PIP=(uv pip install --python "$VENV_DIR/bin/python")
 #    scanpy also brings anndata/pandas/scipy/scikit-learn/matplotlib, covering
 #    every import the upstream package makes apart from torch and tqdm.
 # ---------------------------------------------------------------------------
-log "installing torch ($TORCH_SPEC) ..."
-# shellcheck disable=SC2086
-"${UV_PIP[@]}" $TORCH_SPEC
+# Apply the <2.6 ceiling to whatever TORCH_SPEC holds, so the documented CPU
+# escape hatch (TORCH_SPEC="torch") gets it too and not just the CUDA default: a
+# bare `torch` token becomes `torch$TORCH_MAX`; a constraint the caller wrote
+# themselves is left alone, and so are the index-url flags.
+TORCH_ARGS=()
+# shellcheck disable=SC2086  # TORCH_SPEC is a command line; word-splitting is the point
+for _tok in $TORCH_SPEC; do
+    [[ "$_tok" == "torch" ]] && _tok="torch$TORCH_MAX"
+    TORCH_ARGS+=("$_tok")
+done
+
+log "installing torch (${TORCH_ARGS[*]}) ..."
+"${UV_PIP[@]}" "${TORCH_ARGS[@]}"
 
 log "installing scanpy==$SCANPY_VERSION with '$NUMPY_SPEC' and tqdm ..."
 "${UV_PIP[@]}" "scanpy==$SCANPY_VERSION" "$NUMPY_SPEC" tqdm
@@ -167,6 +211,10 @@ log "installing scanpy==$SCANPY_VERSION with '$NUMPY_SPEC' and tqdm ..."
 log "verifying ..."
 "$VENV_DIR/bin/python" - <<'PY'
 import importlib, sys
+# Enumerated from upstream itself:
+#   grep -hE '^[[:space:]]*(import|from) ' cellContrast/*.py cellContrast.py
+# Third-party top-level packages (the rest are stdlib: os, sys, json, logging,
+# random, time, argparse, collections, importlib, textwrap):
 required = ("torch", "scanpy", "anndata", "numpy", "pandas",
             "scipy", "sklearn", "matplotlib", "tqdm")
 missing = []
@@ -191,12 +239,52 @@ try:
 except Exception:
     pass
 
-# scipy.spatial.KDTree is what upstream uses to build spatial positive pairs
+# torch>=2.6 defaults torch.load to weights_only=True, and upstream's checkpoint
+# carries a pandas Index (train.py:38) that inference.py:26-33 loads bare. That
+# combination dies at INFERENCE, i.e. after training has burned its 12-36 h, so
+# assert the resolved version here rather than trusting the requested spec.
 try:
-    from scipy.spatial import KDTree  # noqa: F401
-    print("  OK   scipy.spatial.KDTree (spatial positives)")
+    import torch as _t
+    _mj, _mn = (int(p) for p in _t.__version__.split(".")[:2])
+    if (_mj, _mn) >= (2, 6):
+        missing.append("torch<2.6")
+        print(f"  FAIL torch {_t.__version__} is >= 2.6; torch.load then "
+              f"defaults to weights_only=True and upstream's checkpoint (a "
+              f"pandas Index) fails to load AT INFERENCE. Rebuild the venv.")
+    else:
+        print(f"  OK   torch<2.6 constraint satisfied ({_t.__version__})")
 except Exception as e:
-    missing.append("scipy.spatial.KDTree"); print(f"  MISS KDTree: {e}")
+    missing.append("torch<2.6"); print(f"  MISS torch version check: {e}")
+
+# Submodules/symbols upstream actually reaches for. A top-level package can
+# import while these do not, and every line below is one upstream executes.
+# NB: the previous version of this check tested scipy.spatial.KDTree, which
+# upstream never uses — it builds spatial positive pairs with sklearn's KDTree.
+# matplotlib.pyplot is imported at MODULE level by loadData.py, so it has to be
+# importable on a display-less node; force the headless backend as the farm's
+# jobs do implicitly.
+import matplotlib
+matplotlib.use("Agg")
+symbols = (
+    ("sklearn.neighbors",        "KDTree",            "loadData.py:7, utils.py:6 (spatial positives)"),
+    ("sklearn.metrics.pairwise", "cosine_similarity", "loadData.py:12, utils.py:2"),
+    ("sklearn.manifold",         "MDS",               "inference.py:9, eval.py:11"),
+    ("scipy.sparse",             "issparse",          "loadData.py:13, inference.py:8"),
+    ("scipy.spatial.distance",   "cdist",             "eval.py:14"),
+    ("scipy.spatial.distance",   "jensenshannon",     "utils.py:8"),
+    ("scipy.stats",              "spearmanr",         "utils.py:10"),
+    ("torch.nn",                 "functional",        "model.py:2-3"),
+    ("tqdm",                     "tqdm",              "loadData.py:11, train.py:10, utils.py:9"),
+    ("matplotlib.pyplot",        "savefig",           "loadData.py:5 (module-level import)"),
+)
+for mod_name, attr, where in symbols:
+    try:
+        mod = importlib.import_module(mod_name)
+        getattr(mod, attr)
+        print(f"  OK   {mod_name}.{attr}  <- {where}")
+    except Exception as e:
+        missing.append(f"{mod_name}.{attr}")
+        print(f"  MISS {mod_name}.{attr} ({where}): {type(e).__name__}: {e}")
 
 try:
     import torch
@@ -218,7 +306,8 @@ import sys, traceback
 bad = []
 for m in ("cellContrast.model", "cellContrast.train",
           "cellContrast.inference", "cellContrast.loadData",
-          "cellContrast.utils"):
+          "cellContrast.utils", "cellContrast.eval",
+          "cellContrast.reconstruct"):
     try:
         __import__(m)
         print(f"  OK   {m}")
@@ -231,9 +320,71 @@ PY
 )
 
 # ---------------------------------------------------------------------------
+# 5. Lockfile — the dependency set we actually resolved
+#
+#    `uv pip install` re-resolves on every run, so two builds months apart can
+#    differ in every transitive pin from identical arguments here. Freeze what we
+#    got, next to the venv it describes, so the env is recoverable (and, when a
+#    result stops reproducing, diffable). The freeze output carries no index URL,
+#    hence the header lines below.
+# ---------------------------------------------------------------------------
+LOCKFILE="${LOCKFILE:-$VENV_DIR/requirements.lock}"
+{
+    printf '# CellContrast baseline env, resolved %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '# upstream commit : %s\n' "$COMMIT"
+    printf '# python          : %s\n' "$PYTHON_VERSION"
+    printf '# torch requested : %s\n' "${TORCH_ARGS[*]}"
+    printf '# scanpy / numpy  : scanpy==%s , %s\n' "$SCANPY_VERSION" "$NUMPY_SPEC"
+    printf '# recreate        : uv venv --python %s <venv> && uv pip install --python <venv>/bin/python -r %s\n' \
+        "$PYTHON_VERSION" "$LOCKFILE"
+} > "$LOCKFILE"
+uv pip freeze --python "$VENV_DIR/bin/python" >> "$LOCKFILE"
+log "lockfile: $LOCKFILE ($(grep -cv '^#' "$LOCKFILE" || true) pinned packages)"
+
+# ---------------------------------------------------------------------------
+# 6. Post-install self-check — the wrapper's own test suite
+#
+#    All four files are numpy-only: no GPU, no /nfs, seconds to run. They cover
+#    the contrastive maths, the harness seam, the coordinate-frame chain and the
+#    wrapper's correctness fixes — i.e. precisely the failures that would produce
+#    plausible-but-wrong numbers many hours into a real run. An env that imports
+#    cleanly is not evidence of that, so gate the setup on them.
+# ---------------------------------------------------------------------------
+if [[ "$SKIP_TESTS" != "1" ]]; then
+    CB_DIR="$HERE/contrastive_baselines"
+    log "running the wrapper test suite ($VENV_DIR/bin/python) ..."
+    test_fails=()
+    for t in test_contrastive_core.py test_harness_adapter.py \
+             test_frame_pipeline.py test_wrapper_fixes.py; do
+        if [[ ! -f "$CB_DIR/$t" ]]; then
+            log "ERROR: expected test file $CB_DIR/$t"; exit 1
+        fi
+        # cwd must be CB_DIR: each test imports contrastive_core /
+        # harness_adapter / run_cellcontrast from alongside itself.
+        if out="$( cd "$CB_DIR" && "$VENV_DIR/bin/python" "$t" 2>&1 )"; then
+            log "  PASS $t"
+        else
+            log "  FAIL $t"
+            printf '%s\n' "$out" >&2
+            test_fails+=("$t")
+        fi
+    done
+    if (( ${#test_fails[@]} > 0 )); then
+        log "ERROR: ${#test_fails[@]} test file(s) failed: ${test_fails[*]}"
+        log "  The env built but the baseline's own checks do not pass. Do not"
+        log "  submit jobs until they do; re-run one for full output with"
+        log "    cd $CB_DIR && $VENV_DIR/bin/python ${test_fails[0]}"
+        exit 1
+    fi
+else
+    log "SKIP_TESTS=1 (wrapper test suite NOT run)"
+fi
+
+# ---------------------------------------------------------------------------
 log "done."
 log "  venv : $VENV_DIR"
-log "  repo : $REPO_DIR"
+log "  repo : $REPO_DIR (commit $COMMIT)"
+log "  lock : $LOCKFILE"
 cat <<EOF
 
 NEXT — smoke-test before any real run (proves the install end-to-end, minutes):

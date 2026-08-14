@@ -249,27 +249,46 @@ ns.apply()
 _TS_RE = re.compile(r"^\d{8}_\d{6}(?:_[A-Za-z0-9]+)?$")
 
 
-def _drop_smoke_test_timestamps(root: Path, timestamps: list[str]) -> list[str]:
-    """Drop runs whose ``run_manifest.json`` says ``smoke_test: true``.
+def _drop_smoke_test_timestamps(root: Path, timestamps: list[str],
+                                require_manifest: bool = False) -> list[str]:
+    """Drop runs that must not reach the figure: smoke tests and PARTIAL runs.
 
-    A smoke test trains a few epochs on 2 slices and scores 1 test slice; on
-    disk it is indistinguishable from a real run, so auto-discovery would
-    silently average it into the figure. Runs without a manifest are kept, so
-    this cannot change behaviour for the pre-existing methods.
+    On disk a smoke test or a crashed run is indistinguishable from a real one,
+    so auto-discovery would silently average it into the figure.
+
+      * ``smoke_test: true`` — a few epochs on 2 slices, 1 test slice scored.
+      * ``status`` present and != "complete" — a wrapper that writes its manifest
+        before the slice loop marks the run incomplete until the last slice
+        lands, so a wall-clock/OOM kill is detectable rather than being averaged
+        against full-section means.
+      * ``require_manifest`` and no manifest at all — an in-flight or crashed run
+        of a method that always writes one.
+
+    Runs without a manifest are kept by DEFAULT, so this cannot change behaviour
+    for the pre-existing methods (none of which write one).
     """
     kept, dropped = [], []
     for ts in timestamps:
         manifest = root / ts / "run_manifest.json"
         if manifest.exists():
             try:
-                if bool(json.loads(manifest.read_text()).get("smoke_test")):
-                    dropped.append(ts)
+                m = json.loads(manifest.read_text())
+                if bool(m.get("smoke_test")):
+                    dropped.append((ts, "smoke_test"))
+                    continue
+                status = m.get("status")
+                if status is not None and str(status) != "complete":
+                    dropped.append((ts, f"status={status!r}"))
                     continue
             except Exception as exc:
                 print(f"[plot_metrics] WARN unreadable {manifest}: {exc}")
+        elif require_manifest:
+            dropped.append((ts, "no run_manifest.json (in-flight or crashed)"))
+            continue
         kept.append(ts)
     if dropped:
-        print(f"[plot_metrics] skipping {len(dropped)} smoke-test run(s): {dropped}")
+        print("[plot_metrics] skipping "
+              + ", ".join(f"{ts} ({why})" for ts, why in dropped))
     return kept
 
 
@@ -685,7 +704,10 @@ def main(argv: list[str] | None = None) -> int:
         or list(DEFAULT_CELLCONTRAST_TIMESTAMPS.get(dataset, []))
         or (_discover_timestamps(cc_root) if cc_root.exists() else [])
     )
-    cc_timestamps = _drop_smoke_test_timestamps(cc_root, cc_timestamps)
+    # require_manifest: run_cellcontrast.py always writes run_manifest.json
+    # before its first slice, so a dir without one is in-flight or crashed.
+    cc_timestamps = _drop_smoke_test_timestamps(cc_root, cc_timestamps,
+                                                require_manifest=True)
     if cc_timestamps:
         print(f"[plot_metrics] CellContrast: {len(cc_timestamps)} run(s)")
         frames.append(_collect("CellContrast", cc_root, cc_timestamps, ext_filename))

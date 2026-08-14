@@ -253,8 +253,11 @@ def main() -> int:
     out.to_csv(out_csv, index=False)
 
     label = {"mmc_luna": "MMC cortex", "cns_luna": "Mouse CNS"}[ds]
-    print(f"\n{label} — mean ± SD over {len(shared)} shared seeds; paired t-test of "
-          f"each method vs {ref} (Delta = {ref} - method; %/stars from that)\n")
+    # Per-row n is printed alongside each method below, because each comparison
+    # now uses its own pair's shared seeds rather than one global intersection.
+    print(f"\n{label} — mean ± SD over each row's own n seeds; paired t-test of "
+          f"each method vs {ref} on that pair's shared seeds "
+          f"(Delta = {ref} - method; %/stars from that)\n")
     for _, r in out.iterrows():
         head = f"{r['method']:7s} n={int(r['n_seeds']):>2d}"
         cells = []
