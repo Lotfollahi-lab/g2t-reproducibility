@@ -175,6 +175,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="cap the ST reference by per-slice stratified subsampling. "
                         "REQUIRED in practice: peak memory is O((n_ref+n_query)^2). "
                         "Recorded in the manifest as a deviation.")
+    p.add_argument("--init_coefficient", default="uniform",
+                   choices=("uniform", "cosine"),
+                   help="how MapNet.Coefficient is initialised. 'uniform' "
+                        "reproduces the released train_eval.py exactly (upstream "
+                        "leaves model.py:48's ones(n,m)/(n*m) in place). 'cosine' "
+                        "calls upstream's OWN MapNet.init_param with its OWN "
+                        "utils.calculate_cosine_similarity(spots, cells) -- both "
+                        "are shipped in the repo with ZERO call sites, and the "
+                        "similarity's shape is exactly Coefficient's, so the "
+                        "released script appears to omit the initialisation step "
+                        "its own code provides. Recorded in the manifest as a "
+                        "deviation either way.")
     p.add_argument("--epochs", type=int, default=None,
                    help="override the preset's training epochs. A DEVIATION; recorded.")
     p.add_argument("--pretrain_epochs", type=int, default=None,
@@ -485,6 +497,25 @@ def fit_come(come_mods, ref_X, ref_cls, qry_X, qry_cls, args, work: Path,
                                np.concatenate((x1, x2), axis=0), config,
                                pretrain_path)
         model.ae.load_state_dict(torch.load(pretrain_path))
+
+        # Initialise the mapping matrix. Done AFTER the AE pretrain (which only
+        # optimises model.ae.parameters(), leaving Coefficient untouched) and
+        # BEFORE train(). init_param assigns to .data in place, so the Adam
+        # instance created above keeps tracking the same Parameter object.
+        if args.init_coefficient == "cosine":
+            S = come_utils.calculate_cosine_similarity(x1, x2)
+            S = np.nan_to_num(np.asarray(S, dtype=np.float32),
+                              nan=0.0, posinf=0.0, neginf=0.0)
+            if S.shape != (x1.shape[0], x2.shape[0]):
+                raise RuntimeError(
+                    f"calculate_cosine_similarity returned {S.shape}, expected "
+                    f"{(x1.shape[0], x2.shape[0])} (Coefficient's shape)")
+            model.map.init_param(torch.from_numpy(S).to(device))
+            LOG.info("  Coefficient <- cosine_similarity(spots, cells) via "
+                     "upstream MapNet.init_param  [%s]",
+                     ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                               for k, v in coefficient_diagnostics(S).items()
+                               if k in ("distinct_argmax_spots", "col_std_median")))
         model.train()
         train_eval.train(model, opt, x1, x2, type_mask, config,
                          f"result/{tag}_model.pkl")
@@ -495,6 +526,51 @@ def fit_come(come_mods, ref_X, ref_cls, qry_X, qry_cls, args, work: Path,
         os.chdir(cwd0)
         shutil.rmtree(fit_dir, ignore_errors=True)
     return C
+
+
+def coefficient_diagnostics(C: np.ndarray) -> Dict[str, float]:
+    """Measure whether the fitted mapping matrix actually differentiates cells.
+
+    Exists because "did COME converge?" is otherwise unanswerable from the log
+    until the read-out either works or collapses, and because a collapse has
+    several possible causes we should not have to guess between. The decisive
+    number is ``col_std_median``: ``Coefficient`` starts as a CONSTANT matrix
+    (model.py:48), and for the argmax read-out to carry information each column
+    (one cell, over all spots) must acquire spread. A value at or near 0 means
+    the columns are still effectively constant, so every cell's argmax is
+    decided by the tie-break rather than by the data.
+    """
+    idx = np.argmax(C, axis=0)
+    col_std = C.std(axis=0)
+    scale = float(np.abs(C).max())
+    # RELATIVE spread is the usable test. An exactly-constant float32 matrix does
+    # NOT give col_std == 0: 1/(n*m) is not representable, so std over identical
+    # float32 values accumulates ~sqrt(n)*eps of rounding (measured 1.25e-12 for
+    # the 500x5180 constant matrix that collapsed on the farm). An absolute
+    # ``<= 0`` test therefore never fires on a real collapse. Dividing by the
+    # matrix's own magnitude separates the two regimes by ~5 orders of magnitude:
+    # ~3e-6 for a constant matrix vs ~0.3 for a differentiated one.
+    col_std_rel = float(np.median(col_std) / scale) if scale > 0 else 0.0
+    return {
+        "n_spots": int(C.shape[0]),
+        "n_cells": int(C.shape[1]),
+        "distinct_argmax_spots": int(len(set(idx.tolist()))),
+        "frac_cells_on_spot0": float((idx == 0).mean()),
+        "C_min": float(C.min()),
+        "C_max": float(C.max()),
+        "C_mean": float(C.mean()),
+        "C_std": float(C.std()),
+        "col_std_median": float(np.median(col_std)),
+        "col_std_min": float(col_std.min()),
+        "col_std_rel": col_std_rel,
+    }
+
+
+# Below this relative column spread, Coefficient is effectively constant and the
+# argmax read-out is decided by the tie-break rather than by the data. The float32
+# noise floor for a truly constant matrix is ~3e-6 relative, and a converged fit
+# measures ~1e-1, so 1e-4 sits with ~30x margin on both sides.
+COL_STD_REL_DEGENERATE = 1e-4
 
 
 def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray,
@@ -536,7 +612,13 @@ def coords_from_coefficient(C: np.ndarray, ref_xy: np.ndarray,
             raise ValueError(
                 msg + " Scoring it would report a collapsed model as a method "
                 "result. (If this IS a smoke test, the wrapper downgrades this "
-                "to a warning automatically.)")
+                "to a warning automatically.) NEXT STEP: check the "
+                "'coefficient diagnostics' line logged just above -- if "
+                "col_std_median is ~0 the mapping matrix never left its constant "
+                "initialisation, and the remedy is --init_coefficient cosine, "
+                "which calls upstream's OWN MapNet.init_param with its OWN "
+                "utils.calculate_cosine_similarity (both shipped, both with zero "
+                "call sites in the released train_eval.py).")
         LOG.warning("  %s Continuing because this is a smoke test — its numbers "
                     "must never be reported.", msg)
     return xy, n_distinct
@@ -628,6 +710,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             "read-out only; COME's training never uses coords",
         "artifact_frame": "original_microns",
         "on_empty_cells": args.on_empty_cells,
+        "init_coefficient": args.init_coefficient,
         "device": args.device,
         # The upstream checkout is byte-identical to the pinned commit; this is
         # applied to the IMPORTED class at runtime and is a device placement
@@ -694,6 +777,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             come_mods = _import_come(repo)
         C = fit_come(come_mods, ref_X, ref_cls, feats, cls, args, work,
                      tag=f"{dataset}_{label}_s{args.seed}")
+        # Log diagnostics BEFORE the collapse guard, so a raise is still
+        # accompanied by the numbers that explain it.
+        diag = coefficient_diagnostics(C)
+        LOG.info("  coefficient diagnostics: " + "  ".join(
+            f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+            for k, v in diag.items()))
+        if diag["col_std_rel"] <= COL_STD_REL_DEGENERATE:
+            LOG.warning("  col_std_rel=%.3g <= %.0e: every cell's column of "
+                        "Coefficient is effectively CONSTANT across spots, so the "
+                        "argmax read-out carries no information and is decided by "
+                        "the tie-break. The mapping matrix never left its "
+                        "initialisation. Remedy: --init_coefficient cosine "
+                        "(upstream's own MapNet.init_param + "
+                        "utils.calculate_cosine_similarity, both shipped with zero "
+                        "call sites in the released train_eval.py).",
+                        diag["col_std_rel"], COL_STD_REL_DEGENERATE)
         pred_norm, n_distinct = coords_from_coefficient(
             C, ref_xy, allow_degenerate=args.smoke_test)
         # Read-out is in the shared normalised frame -> this slice's microns.
@@ -706,7 +805,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         per_slice.append({"section": label, "n_cells": n_cells,
                           "n_empty_cells": n_empty,
                           "est_peak_gb": round(peak / 1e9, 2),
-                          "distinct_predicted_positions": n_distinct})
+                          "distinct_predicted_positions": n_distinct,
+                          "coefficient_diagnostics": diag})
 
     if args.dry_run:
         LOG.info("dry run complete; per-slice plan: %s",

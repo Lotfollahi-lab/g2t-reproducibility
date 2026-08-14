@@ -225,6 +225,37 @@ expect_raises(lambda: C.load_query(_Mod(_Ad(X, xy, cls, names)),
                                    ref_var + ["g_absent"]),
               ValueError, "reference gene absent from the test panel refused")
 
+print("\n[4b] coefficient_diagnostics — must make a collapse self-explaining")
+# The exact situation observed on the farm: Coefficient still constant.
+const = np.full((500, 5180), 1.0 / (500 * 5180), dtype=np.float32)
+d_const = C.coefficient_diagnostics(const)
+check(d_const["col_std_median"] > 0.0,
+      "a float32 constant matrix does NOT give col_std_median == 0 "
+      "(why the absolute test was wrong)", f"{d_const['col_std_median']:.3g}")
+check(d_const["col_std_rel"] <= C.COL_STD_REL_DEGENERATE,
+      "constant Coefficient IS flagged by the RELATIVE criterion",
+      f"col_std_rel={d_const['col_std_rel']:.3g} <= {C.COL_STD_REL_DEGENERATE:.0e}")
+check(d_const["distinct_argmax_spots"] == 1,
+      "constant Coefficient -> 1 distinct spot")
+check(d_const["frac_cells_on_spot0"] == 1.0,
+      "constant Coefficient -> every cell lands on spot 0 (tie-break)")
+# A healthy, differentiated matrix
+rngd = np.random.default_rng(1)
+healthy = rngd.random((200, 900)).astype(np.float32)
+d_ok = C.coefficient_diagnostics(healthy)
+check(d_ok["col_std_rel"] > C.COL_STD_REL_DEGENERATE * 100,
+      "differentiated Coefficient is far above the threshold (wide margin)",
+      f"col_std_rel={d_ok['col_std_rel']:.3g}")
+check(d_ok["distinct_argmax_spots"] > 50,
+      "differentiated Coefficient -> many distinct spots",
+      str(d_ok["distinct_argmax_spots"]))
+check(set(d_ok) == {"n_spots", "n_cells", "distinct_argmax_spots",
+                    "frac_cells_on_spot0", "C_min", "C_max", "C_mean", "C_std",
+                    "col_std_median", "col_std_min", "col_std_rel"},
+      "diagnostics dict has the documented keys (it goes into the manifest)")
+check(all(isinstance(v, (int, float)) for v in d_ok.values()),
+      "all diagnostics are JSON-serialisable scalars")
+
 print("\n[5] _patch_contrastive_device — fixes upstream's CUDA crash, changes no maths")
 # Fake the two-device situation with plain Python objects: no torch needed. A
 # "tensor" here records its device and whether it was moved.
