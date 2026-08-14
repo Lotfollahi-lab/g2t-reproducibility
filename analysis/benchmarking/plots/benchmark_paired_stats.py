@@ -118,13 +118,29 @@ def _discover_cellcontrast(root: Path):
         manifest = p / "run_manifest.json"
         if manifest.exists():
             try:
-                if bool(json.loads(manifest.read_text()).get("smoke_test")):
+                m = json.loads(manifest.read_text())
+                if bool(m.get("smoke_test")):
                     print(f"[bench-stats] skipping smoke-test run {p.name}",
                           file=sys.stderr)
+                    continue
+                # run_cellcontrast.py writes the manifest BEFORE its slice loop
+                # and flips status to "complete" only after the last slice, so a
+                # run killed by wall clock or OOM is detectable here. Averaging
+                # one in would mix a 2-4 section run into 14-section means.
+                status = m.get("status")
+                if status is not None and str(status) != "complete":
+                    print(f"[bench-stats] skipping incomplete run {p.name} "
+                          f"(status={status!r})", file=sys.stderr)
                     continue
             except Exception as exc:
                 print(f"[bench-stats] WARN unreadable {manifest}: {exc}",
                       file=sys.stderr)
+        else:
+            # This method always writes a manifest, so its absence means the run
+            # is in flight or died before it got there.
+            print(f"[bench-stats] skipping {p.name}: no run_manifest.json "
+                  f"(in-flight or crashed run)", file=sys.stderr)
+            continue
         out.append(p.name)
     return out
 
@@ -188,26 +204,43 @@ def main() -> int:
     ref = args.reference
     others = [m for m in ("G2T", "LUNA", "CeLEry", "CellContrast")
               if m != ref and m in data]
-    shared = sorted(set(data[ref]).intersection(*[set(data[m]) for m in others]))
-    print(f"[bench-stats] dataset={ds}: shared seeds across all methods = "
-          f"{len(shared)} {shared}")
-    if len(shared) < 2:
-        raise SystemExit("Need >=2 shared seeds across all methods for a paired test.")
+    # Each reference-vs-comparator test uses THAT PAIR's shared seeds. Using a
+    # single global intersection across every method present would let an
+    # incomplete sweep of one method silently change the p-values of comparisons
+    # it is not part of: with 3 of 5 CellContrast runs on disk the intersection
+    # drops to 3 seeds and the LUNA-vs-G2T Spearman result moves from
+    # 0.4534+-0.0083 (p=0.018, *) to 0.4516+-0.0100 (p=0.066, n.s.). This is a
+    # bit-for-bit no-op while every method has the same complete seed set.
+    ref_seeds = sorted(set(data[ref]))
+    pair_seeds = {m: sorted(set(data[ref]) & set(data[m])) for m in others}
+    print(f"[bench-stats] dataset={ds}: reference {ref} has {len(ref_seeds)} "
+          f"seed(s) {ref_seeds}")
+    for m in others:
+        print(f"[bench-stats]   {ref} vs {m}: {len(pair_seeds[m])} paired "
+              f"seed(s) {pair_seeds[m]}")
+    thin = [m for m in others if len(pair_seeds[m]) < 2]
+    if thin:
+        raise SystemExit(
+            f"Need >=2 shared seeds per pair for a paired test; too few for: "
+            + ", ".join(f"{ref} vs {m} ({len(pair_seeds[m])})" for m in thin))
 
-    def vals(method, col):
-        return [data[method][s][col] for s in shared]
+    def vals(method, col, seeds):
+        return [data[method][s][col] for s in seeds]
 
     order = [ref] + others
     rows = []
     for m in order:
-        rec = {"method": m, "n_seeds": len(shared)}
+        seeds_m = ref_seeds if m == ref else pair_seeds[m]
+        rec = {"method": m, "n_seeds": len(seeds_m)}
         for col, (disp, direction) in METRICS.items():
-            v = np.array(vals(m, col), float)
+            v = np.array(vals(m, col, seeds_m), float)
             rec[f"{col}_mean"] = float(v.mean())
             rec[f"{col}_sd"] = float(v.std(ddof=1))
             if m != ref:
-                rv = np.array(vals(ref, col), float)          # reference (G2T)
-                t, p, n = paired_t(list(rv), list(v))          # G2T vs comparator
+                # Reference values restricted to this pair's seeds, so the delta
+                # and the p-value describe the same paired sample.
+                rv = np.array(vals(ref, col, seeds_m), float)
+                t, p, n = paired_t(list(rv), list(v))          # ref vs comparator
                 delta = float(rv.mean() - v.mean())            # (G2T - comparator)
                 denom = abs(v.mean()) if v.mean() != 0 else float("nan")
                 pct = (delta if direction > 0 else -delta) / denom * 100.0

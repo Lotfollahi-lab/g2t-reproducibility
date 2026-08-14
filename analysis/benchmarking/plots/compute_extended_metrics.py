@@ -200,32 +200,55 @@ def _discover_timestamps(root: Path) -> list[str]:
     return timestamps
 
 
-def _drop_smoke_test_timestamps(root: Path, timestamps: list[str]) -> list[str]:
-    """Drop runs whose ``run_manifest.json`` says ``smoke_test: true``.
+def _drop_smoke_test_timestamps(root: Path, timestamps: list[str],
+                                require_manifest: bool = False) -> list[str]:
+    """Drop runs that must not be averaged in: smoke tests and PARTIAL runs.
 
-    Smoke tests train for a handful of epochs on 2 slices and score 1 test
-    slice. They exist to prove an install works and their numbers are
-    meaningless, but on disk they are indistinguishable from a real run — same
-    directory layout, same artifact filenames. Auto-discovery would happily
-    pick them up and average them in, which is exactly the kind of error that
-    survives review. Runs without a manifest are kept (all pre-existing
-    methods) so this cannot change historical behaviour.
+    Three rejection reasons, all of which otherwise produce a directory that is
+    indistinguishable from a good run — same layout, same artifact filenames —
+    so auto-discovery would happily average them in:
+
+      * ``smoke_test: true``. Smoke tests train a handful of epochs on 2 slices
+        and score 1 test slice; they exist to prove an install works and their
+        numbers are meaningless.
+      * ``status`` present and not "complete". A wrapper that writes its manifest
+        BEFORE the slice loop (so a crash still leaves provenance) marks the run
+        incomplete until the last slice lands. A wall-clock or OOM kill partway
+        through otherwise yields a run scored over 2-4 sections that gets
+        averaged against 14-section means.
+      * ``require_manifest`` and there is no manifest at all — an in-flight or
+        crashed run of a method that always writes one. NOTE: runs WITHOUT a
+        manifest are kept by default, because none of the pre-existing methods
+        write one and dropping them would silently change historical behaviour.
+
+    This does NOT paper over a missing extended_metrics.csv for an otherwise
+    complete run — that must still raise, so a partial SEED SET is never
+    published as a mean.
     """
     kept, dropped = [], []
     for ts in timestamps:
         manifest = root / ts / "run_manifest.json"
         if manifest.exists():
             try:
-                if bool(json.loads(manifest.read_text()).get("smoke_test")):
-                    dropped.append(ts)
+                m = json.loads(manifest.read_text())
+                if bool(m.get("smoke_test")):
+                    dropped.append((ts, "smoke_test"))
+                    continue
+                status = m.get("status")
+                if status is not None and str(status) != "complete":
+                    dropped.append((ts, f"status={status!r}"))
                     continue
             except Exception as exc:            # unreadable manifest -> keep, warn
                 print(f"[compute_extended] WARN unreadable {manifest}: {exc}",
                       file=sys.stderr)
+        elif require_manifest:
+            dropped.append((ts, "no run_manifest.json (in-flight or crashed)"))
+            continue
         kept.append(ts)
     if dropped:
-        print(f"[compute_extended] skipping {len(dropped)} smoke-test run(s): "
-              f"{dropped}")
+        print("[compute_extended] skipping "
+              f"{len(dropped)} run(s): "
+              + ", ".join(f"{ts} ({why})" for ts, why in dropped))
     return kept
 
 
@@ -318,6 +341,7 @@ def _score_timestamp(
     vectorized: bool = False,
     backend: str = "scipy",
     workers: int = 1,
+    rssd_frame: str = "per_slice_norm",
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Score every slice under one <TS> dir; return per-slice df + aggregate.
 
@@ -348,7 +372,7 @@ def _score_timestamp(
     # CSVs from disk, returns a dict) so it parallelises cleanly via
     # ProcessPoolExecutor when workers > 1.
     work_items = [
-        (sd, ts, method_label, effective_backend) for sd in slice_dirs
+        (sd, ts, method_label, effective_backend, rssd_frame) for sd in slice_dirs
     ]
 
     per_slice_rows: list[Dict[str, float]] = []
@@ -399,19 +423,73 @@ def _score_timestamp(
     return per_slice_df, aggregate
 
 
+def _position_normalize(coords: np.ndarray) -> np.ndarray:
+    """Per-axis min-max into [-0.5, 0.5] — LUNA's ``position_normalize``.
+
+    Reimplemented here (rather than imported) so the scorer has no dependency on
+    the model repo's internals: ``scgg/src/utils/data/load.py:142-160`` is
+    ``(x - min) / (max - min) - 0.5`` applied per axis, grouped by cell_section.
+    A degenerate axis (every cell sharing a value — reachable when a top-1
+    copying method collapses onto a row of reference positions) would divide by
+    zero, so substitute span 1.0, which sends that axis to a constant -0.5.
+    """
+    c = np.asarray(coords, dtype=np.float64)
+    lo = c.min(axis=0)
+    span = c.max(axis=0) - lo
+    span = np.where(span > 0, span, 1.0)
+    return (c - lo) / span - 0.5
+
+
 def _score_one_slice(
     slice_dir: Path,
     ts: str,
     method_label: str,
     backend: str,
+    rssd_frame: str = "per_slice_norm",
 ) -> Dict[str, float]:
     """Score one slice. Pure function — picklable for multiprocessing.
 
     Lives at module scope (not nested inside _score_timestamp) because
     ProcessPoolExecutor pickles the function by qualified name; nested
     functions are not picklable.
+
+    ``rssd_frame`` fixes a CROSS-METHOD COMPARABILITY DEFECT, so read this before
+    changing it. The methods do not write their metadata CSVs in the same
+    coordinate frame:
+
+      * LUNA and G2T write BOTH files in the per-slice [-0.5, 0.5] frame — truth
+        is normalised at load (``data_module.py:51``) and the prediction is
+        independently re-normalised (``test.py:274``).
+      * CeLEry, novosparc and CellContrast write ORIGINAL MICRONS.
+
+    ``compute_kabsch_rssd`` fits a ROTATION ONLY (``luna_metrics.py:662``
+    ``R.align_vectors`` — no scale, no translation), so it is homogeneous of
+    degree 1 in coordinate scale: the same prediction quality scores ~(micron
+    span) times larger in microns. That is why the checked-in mmc_luna table has
+    G2T 76.1 / LUNA 77.3 but CeLEry 602,920 (~7,900x), and cns_luna LUNA 666 vs
+    CeLEry 36,993,780 (~55,000x) — those gaps are dominated by UNITS, not by
+    accuracy, and any cross-method RSSD claim built on them is invalid.
+
+      * ``per_slice_norm`` (default): min-max both arrays per slice before
+        scoring, each by its OWN bounding box. This reproduces LUNA's convention
+        exactly for every method, so RSSD becomes scale- and offset-invariant and
+        comparable. It is near-idempotent for LUNA/G2T (their CSVs are already in
+        that frame), so their historical numbers are essentially unchanged, while
+        the micron-frame methods drop to a comparable magnitude.
+      * ``as_written``: the old behaviour. Only meaningful WITHIN a group that
+        shares a frame.
+
+    Note the normalisation is per-axis and therefore not a similarity transform,
+    so Spearman and Contact F1 shift slightly too (measured <=0.013 on Spearman
+    at MMC aspect ratios). That is the price of putting every method in one
+    frame, and it is applied identically to all of them.
     """
     coords_true, coords_pred, cell_class, slice_name = _load_pair(slice_dir)
+    if rssd_frame == "per_slice_norm":
+        coords_true = _position_normalize(coords_true)
+        coords_pred = _position_normalize(coords_pred)
+    elif rssd_frame != "as_written":
+        raise ValueError(f"unknown rssd_frame {rssd_frame!r}")
     row = evaluate_slice(
         coords_true=coords_true,
         coords_pred=coords_pred,
@@ -424,6 +502,7 @@ def _score_one_slice(
     row["slice_name"] = slice_name
     row["timestamp"] = ts
     row["method"] = method_label
+    row["rssd_frame"] = rssd_frame
     return row
 
 
@@ -640,6 +719,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--rssd_frame",
+        default="per_slice_norm",
+        choices=("per_slice_norm", "as_written"),
+        help=(
+            "Coordinate frame used for scoring. The methods do NOT write their "
+            "metadata CSVs in a common frame: LUNA/G2T write the per-slice "
+            "[-0.5,0.5] frame (truth normalised at data_module.py:51, prediction "
+            "re-normalised at test.py:274) while CeLEry, novosparc and "
+            "CellContrast write original microns. compute_kabsch_rssd fits a "
+            "rotation only (no scale), so it is homogeneous of degree 1 in "
+            "coordinate scale and RSSD is NOT comparable across those groups -- "
+            "this is why the checked-in mmc_luna table shows G2T 76 / LUNA 77 but "
+            "CeLEry 602,921. 'per_slice_norm' (default) min-max normalises BOTH "
+            "arrays per slice, each by its own bbox, reproducing LUNA's "
+            "convention for every method; it is near-idempotent for LUNA/G2T. "
+            "'as_written' is the old, non-comparable behaviour. Changing this "
+            "changes published CeLEry/novosparc numbers, so re-score all methods "
+            "in one pass."
+        ),
+    )
+    p.add_argument(
         "--list_work",
         action="store_true",
         help=(
@@ -769,7 +869,11 @@ def main(argv: list[str] | None = None) -> int:
             _parse_ts_list(args.cellcontrast_timestamps)
             or _discover_timestamps(cellcontrast_root)
         )
-        cc_ts = _drop_smoke_test_timestamps(cellcontrast_root, cc_ts)
+        # require_manifest: run_cellcontrast.py ALWAYS writes run_manifest.json
+        # before its first slice, so a cellcontrast dir without one is in-flight
+        # or crashed and must not be scored.
+        cc_ts = _drop_smoke_test_timestamps(cellcontrast_root, cc_ts,
+                                            require_manifest=True)
         if not cc_ts:
             raise RuntimeError(
                 f"No CellContrast timestamps for dataset={dataset!r} under "
@@ -840,6 +944,16 @@ def main(argv: list[str] | None = None) -> int:
         f"[compute_extended] speedup knobs: "
         f"backend={backend} workers={workers}"
     )
+    print(f"[compute_extended] rssd_frame={args.rssd_frame}")
+    if args.rssd_frame == "per_slice_norm":
+        print("[compute_extended] NOTE: both metadata CSVs are min-max "
+              "normalised per slice before scoring, so RSSD is comparable "
+              "across methods that write different coordinate frames "
+              "(LUNA/G2T write [-0.5,0.5]; CeLEry/novosparc/CellContrast write "
+              "microns). This CHANGES previously published CeLEry/novosparc "
+              "numbers -- re-score every method in one pass and state the frame "
+              "in the write-up. Pass --rssd_frame as_written for the old "
+              "behaviour.")
     # When workers > 1 the per-process BLAS threading would multiply
     # against the worker count and oversubscribe the box. Pin each
     # worker to a single BLAS thread so the total thread count stays
@@ -871,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
                 per_slice_df, aggregate = _score_timestamp(
                     ts, root, method_label,
                     backend=backend, workers=workers,
+                    rssd_frame=args.rssd_frame,
                 )
                 _write_outputs(ts, root, per_slice_df, aggregate, suffix=suffix)
                 n_done += 1

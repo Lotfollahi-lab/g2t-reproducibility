@@ -10,6 +10,11 @@
 # at their default hyperparameters via run_cellcontrast.py. Nothing here changes
 # the method.
 #
+# The imaging-vs-spot parameter choice (the paper's k_nearest_positives: 80 vs
+# 20) and the normalisation mode are DERIVED from --dataset here, not left to the
+# runner's defaults — see the per-dataset table below. The runner independently
+# re-checks both and refuses a mismatch; that duplication is deliberate.
+#
 # Usage:
 #   # 0) once: clone + env, then ALWAYS smoke-test before a real run
 #   bash ../setup_cellcontrast_env.sh
@@ -18,30 +23,75 @@
 #   # 1) cortex, 5 seeds
 #   bash submit_cellcontrast.sh --dataset mmc_luna --seeds "0 1 2 3 4"
 #
-#   # 2) CNS — needs the embedding key and a training cap (2.85M cells is ~9 days)
-#   bash submit_cellcontrast.sh --dataset cns_luna --use_obsm <OBSM_KEY> \
-#        --max_train_cells 150000 --seeds "0 1 2 3 4"
+#   # 2) CNS. The shared 600-d cross-platform latent lives in adata.X ITSELF —
+#   #    the only obsm key on those h5ads is 'spatial' — so do NOT pass
+#   #    --use_obsm; the latent is handed over untouched via
+#   #    --expression_mode silver_raw (the default for this dataset). Needs a
+#   #    training cap: 2.85M cells is ~9 days.
+#   bash submit_cellcontrast.sh --dataset cns_luna --max_train_cells 150000 \
+#        --exclude_test_files sagittal1_test.h5ad,sagittal2_test.h5ad,sagittal3_test.h5ad,spinalcord_test.h5ad \
+#        --seeds "0 1 2 3 4"
+#
+#   # 3) 10x Xenium breast (imaging, k=80) and 10x Visium DLPFC (spot, k=20);
+#   #    both are raw integer counts, so both default to silver_raw
+#   bash submit_cellcontrast.sh --dataset breast_janesick --seeds "0 1 2 3 4"
+#   bash submit_cellcontrast.sh --dataset dlpfc_visium    --seeds "0 1 2 3 4"
 #
 # Options:
-#   --dataset NAME        mmc_luna | cns_luna   (required)
+#   --dataset NAME        mmc_luna | cns_luna | breast_janesick | dlpfc_visium
+#                         (required)
 #   --seeds "0 1 2"       seeds, one job each   (default "0 1 2 3 4")
 #   --data_dir DIR        override the silver dir
-#   --repo DIR            CellContrast checkout  (default $CELLCONTRAST_REPO or
-#                         /nfs/team361/sb75/CellContrast)
+#   --repo DIR            CellContrast checkout  (default $CELLCONTRAST_REPO, else
+#                         <this dir>/../CellContrast, i.e. the clone
+#                         setup_cellcontrast_env.sh makes beside the other
+#                         benchmarking assets)
 #   --venv DIR            uv venv                (default
 #                         /nfs/team361/sb75/.venvs/cellcontrast)
 #   --epochs N            override training_epoch. OMIT to use the authors'
 #                         default (3000) — that is the defensible choice for a
 #                         baseline. 1000 is ~3x faster and the paper says >1000
 #                         suffices, but it IS a deviation and is recorded.
-#   --use_obsm KEY        feature matrix from adata.obsm[KEY] instead of genes
-#                         (REQUIRED for cns_luna: the Harmony latent, matching
-#                         our protocol for G2T/LUNA on that dataset)
+#   --expression_mode M   log2 | silver_raw. Default is PER DATASET (table below):
+#                         log2(1+x) where silver X holds count-magnitude values,
+#                         silver_raw where the matrix must be handed over
+#                         untouched (the both-sign cns_luna latent, raw counts).
+#   --coord_frame F       isotropic (default) | per_axis. isotropic preserves the
+#                         aspect ratio, so upstream's k-NN positive graph is
+#                         identical to raw microns; per_axis matches LUNA/G2T's
+#                         position_normalize but changes 7-14% of the positive set.
+#   --query_chunk N       cells per inference call (default per dataset, 8000).
+#                         Upstream builds dense query x query AND query x ref
+#                         matrices, so a 63k-cell CNS slice unchunked peaks near
+#                         292 GB. top-1 retrieval is per-row independent, so
+#                         chunking is bit-identical. 0 disables it.
+#   --max_mem_gb G        make the runner REFUSE before inference if its estimated
+#                         peak exceeds this (default: 85% of the LSF reservation,
+#                         leaving headroom for torch and the loaded objects), so a
+#                         bad memory plan fails in seconds, not 6 hours in.
+#   --force_platform      pass through the runner's dataset-vs-parameter-file
+#                         check. Only needed for a dataset whose name does not
+#                         advertise its platform; it does NOT change the flag
+#                         derived here.
+#   --use_obsm KEY        feature matrix from adata.obsm[KEY] instead of .X.
+#                         'spatial' is REFUSED on every dataset (it would feed
+#                         ground-truth coordinates in as features), and any
+#                         --use_obsm is refused on cns_luna (its latent is in .X).
 #   --max_train_cells N   cap training cells by per-slice subsampling
 #   --max_ref_cells N     cap the inference reference (memory)
+#   --exclude_test_files  comma-separated *_test.h5ad basenames to skip, so the
+#                         mean is over the SAME sections as G2T/LUNA/CeLEry.
+#                         Required for cns_luna (4 of 18 sections are excluded
+#                         there). Basenames are matched exactly; a name that is
+#                         not in the data dir is warned about, not guessed.
 #   --smoke_test          tiny 1-job run to prove the install; never reported
 #   --mem MB / --wall HH:MM / --queue Q / --group G / --gpu SPEC
 #   --dry_run             print the bsub commands without submitting
+#
+# Env overrides: CELLCONTRAST_REPO, VENV_DIR, SCGG_ARTIFACTS_ROOT, LSF_GROUP,
+# LSF_QUEUE, MEM_MB, WALL, GPU_SPEC, EXCLUDE_TEST_FILES, and CORES (default 8:
+# the LSF slot count, also exported as OMP/MKL/OPENBLAS_NUM_THREADS in the job so
+# upstream's per-row argsort does not oversubscribe a shared node).
 # ------------------------------------------------------------------------------
 set -euo pipefail
 
@@ -60,6 +110,13 @@ EPOCHS=""
 USE_OBSM=""
 MAX_TRAIN_CELLS=""
 MAX_REF_CELLS=""
+# Empty means "take the per-dataset default from the table below". Anything set
+# here (flag or env) wins, except where a gate proves it wrong.
+EXPRESSION_MODE=""
+COORD_FRAME="${COORD_FRAME:-isotropic}"
+QUERY_CHUNK=""
+MAX_MEM_GB=""
+FORCE_PLATFORM=""
 # Comma-separated *_test.h5ad basenames to skip. The runner supports this but the
 # submitter never forwarded it, so a CNS run scored all 18 test sections while
 # G2T/LUNA/CeLEry score 14 (sagittal1/2/3 + spinalcord excluded) — a mean over a
@@ -70,7 +127,9 @@ DRY_RUN=""
 ARTIFACTS_ROOT="${SCGG_ARTIFACTS_ROOT:-/nfs/team361/sb75/scgg-reproducibility/artifacts}"
 LSF_GROUP="${LSF_GROUP:-s10396}"
 LSF_QUEUE="${LSF_QUEUE:-training-parallel}"
-MEM_MB="${MEM_MB:-128000}"
+# Empty means "per-dataset default" (see the table); the old flat 128000 was set
+# for mmc-sized slices and is not the right reservation for the CNS/Xenium runs.
+MEM_MB="${MEM_MB:-}"
 WALL="${WALL:-48:00}"
 CORES="${CORES:-8}"
 GPU_SPEC="${GPU_SPEC:-num=1:mode=shared:j_exclusive=no}"

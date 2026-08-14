@@ -78,10 +78,16 @@ done
 [[ -f "$SUBMIT"     ]] || { echo "ERROR: submitter not found: $SUBMIT" >&2; exit 2; }
 [[ -f "$CHECKPOINT" ]] || { echo "ERROR: checkpoint not found: $CHECKPOINT" >&2; exit 2; }
 [[ -f "$TRAIN_CSV"  ]] || { echo "ERROR: train_csv not found: $TRAIN_CSV" >&2; exit 2; }
-[[ -f "$COND_ROOT/E_manifest.csv" ]] || {
-  echo "ERROR: $COND_ROOT/E_manifest.csv missing." >&2
-  echo "       Run make_subsample_conditions.py first — the scorer needs the" >&2
-  echo "       fixed evaluation set, and without it these runs are unusable." >&2
+# cell_index.csv is written in BOTH generator modes and the scorer cannot work
+# without it: it maps every cell id to its section, which is how a slice's
+# identity is recovered. The written output directory name is NOT usable for that
+# (test.py:241-249 looks the name up by cell count, so subsampling can collide two
+# sections or miss and yield "unknown"). E_manifest.csv is only produced by, and
+# only needed for, the fixed-E mode (--eval E), so it is NOT required here.
+[[ -f "$COND_ROOT/cell_index.csv" ]] || {
+  echo "ERROR: $COND_ROOT/cell_index.csv missing." >&2
+  echo "       Run make_subsample_conditions.py first — without it the runs" >&2
+  echo "       cannot be scored, because slice identity is unrecoverable." >&2
   exit 2; }
 
 # The checkpoint's epoch index is parsed from its FILENAME (scgg src/main.py:110

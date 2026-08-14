@@ -23,9 +23,15 @@
 # Defaults (override via env vars):
 #   VENV_DIR        = /nfs/team361/sb75/.venvs/cellcontrast     uv-managed venv
 #   REPO_DIR        = <this dir>/CellContrast                   authors' code
+#   REPO_COMMIT     = 0559aa9  (upstream main, pinned — see below)
 #   PYTHON_VERSION  = 3.9      (upstream's pin)
 #   SCANPY_VERSION  = 1.9.3    (upstream's pin)
-#   TORCH_SPEC      = torch --index-url .../cu121
+#   TORCH_SPEC      = torch<2.6 --index-url .../cu121
+#   LOCKFILE        = <VENV_DIR>/requirements.lock              resolved pins
+#
+# The script ends by running the wrapper's own numpy-only test suite against the
+# new venv and FAILS if any of it fails — an env that merely imports is not
+# evidence the baseline computes the right thing.
 #
 # Usage:
 #   bash scgg-reproducibility/analysis/benchmarking/setup_cellcontrast_env.sh
@@ -36,6 +42,9 @@
 #
 # Env only (skip the clone):
 #   SKIP_CLONE=1 bash .../setup_cellcontrast_env.sh
+#
+# Skip the post-install test suite (not recommended):
+#   SKIP_TESTS=1 bash .../setup_cellcontrast_env.sh
 
 set -euo pipefail
 
@@ -44,6 +53,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-/nfs/team361/sb75/.venvs/cellcontrast}"
 REPO_DIR="${REPO_DIR:-$HERE/CellContrast}"
 REPO_URL="${REPO_URL:-https://github.com/HKU-BAL/CellContrast.git}"
+# Pin the upstream revision. Upstream has no tags and no releases, so a bare
+# clone tracks main and "the CellContrast baseline" would quietly mean different
+# code on every re-run. This is main as of 2024-07-18 ("add link to Patterns
+# ppr"), i.e. the state of the code the published paper describes, and the
+# revision every number in our tables was produced from.
+REPO_COMMIT="${REPO_COMMIT:-0559aa9d5fbd3d56524d39aa16705e266195a5b5}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.9}"
 SCANPY_VERSION="${SCANPY_VERSION:-1.9.3}"
 # scanpy 1.9.3 predates NumPy 2 and uses np.float_, which NumPy 2.0 REMOVED.
@@ -55,8 +70,18 @@ SCANPY_VERSION="${SCANPY_VERSION:-1.9.3}"
 NUMPY_SPEC="${NUMPY_SPEC:-numpy<2}"
 # Upstream leaves torch unpinned; choose a CUDA build for the cluster. Set
 # TORCH_SPEC="torch" for a CPU-only install.
-TORCH_SPEC="${TORCH_SPEC:-torch --index-url https://download.pytorch.org/whl/cu121}"
+#
+# The <2.6 ceiling is not cosmetic. torch 2.6 flipped ``torch.load``'s default to
+# weights_only=True. Upstream saves a pandas Index inside the checkpoint
+# (cellContrast/train.py:38) and loads it bare (cellContrast/inference.py:26-33),
+# so torch>=2.6 raises at INFERENCE — that is, AFTER a 12-36 h training run has
+# already completed. The cu121 index happens to top out at 2.5.1, so the CUDA
+# default was safe by accident; plain ``torch`` on py3.9 resolves to >=2.6, so
+# the ceiling has to be written down to hold on both paths.
+TORCH_MAX="${TORCH_MAX:-<2.6}"
+TORCH_SPEC="${TORCH_SPEC:-torch$TORCH_MAX --index-url https://download.pytorch.org/whl/cu121}"
 SKIP_CLONE="${SKIP_CLONE:-0}"
+SKIP_TESTS="${SKIP_TESTS:-0}"
 
 # The uv cache and /nfs are on different filesystems here, so hardlinking is
 # unavailable; say so up front instead of emitting a warning per install.
