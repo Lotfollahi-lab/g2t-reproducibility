@@ -210,6 +210,70 @@ expect_raises(lambda: C.load_query(_Mod(_Ad(X, xy, cls, names)),
                                    ref_var + ["g_absent"]),
               ValueError, "reference gene absent from the test panel refused")
 
+print("\n[5] _patch_contrastive_device — fixes upstream's CUDA crash, changes no maths")
+# Fake the two-device situation with plain Python objects: no torch needed. A
+# "tensor" here records its device and whether it was moved.
+
+
+class _T:
+    def __init__(self, device, tag):
+        self.device = device
+        self.tag = tag
+        self.moved_to = None
+
+    def to(self, device):
+        out = _T(device, self.tag)
+        out.moved_to = device
+        return out
+
+
+class _FakeCL:
+    """Stand-in for upstream ContrastiveLoss.forward: records what it received
+    and raises if the mask device differs from the embeddings', exactly as
+    torch.mul does at model.py:170."""
+    seen = None
+
+    def forward(self, h1, h2, mask=None):
+        if mask is not None and mask.device != h1.device:
+            raise RuntimeError("Expected all tensors to be on the same device, "
+                               f"but found at least two devices, {h1.device} "
+                               f"and {mask.device}!")
+        _FakeCL.seen = (h1.device, mask.device if mask is not None else None)
+        return "loss"
+
+
+class _FakeModule:
+    ContrastiveLoss = _FakeCL
+
+
+# Before patching, upstream's own behaviour must reproduce the reported error.
+h1, h2 = _T("cuda:0", "z1"), _T("cuda:0", "z2")
+cpu_mask = _T("cpu", "full_mask")
+expect_raises(lambda: _FakeCL().forward(h1, h2, mask=cpu_mask), RuntimeError,
+              "unpatched: CPU mask + CUDA embeddings raises (the reported bug)")
+
+mod = _FakeModule()
+applied = C._patch_contrastive_device(mod)
+check(applied is True, "patch reports it was applied")
+res = mod.ContrastiveLoss().forward(h1, h2, mask=cpu_mask)
+check(res == "loss", "patched: the call now succeeds")
+check(_FakeCL.seen == ("cuda:0", "cuda:0"),
+      "patched: the mask arrives on the EMBEDDINGS' device", str(_FakeCL.seen))
+check(cpu_mask.device == "cpu",
+      "the caller's own mask object is left on its original device (we pass a copy)")
+# idempotent: importing twice must not wrap twice
+check(C._patch_contrastive_device(mod) is False,
+      "patch is idempotent (a second import does not double-wrap)")
+# a same-device mask must be passed through UNTOUCHED (no needless copy)
+gpu_mask = _T("cuda:0", "m")
+mod.ContrastiveLoss().forward(h1, h2, mask=gpu_mask)
+check(gpu_mask.moved_to is None,
+      "a mask already on the right device is not copied")
+# mask=None must still work (upstream's mask_correlated_samples path)
+_FakeCL.seen = None
+check(mod.ContrastiveLoss().forward(h1, h2) == "loss",
+      "mask=None still reaches upstream unchanged")
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED ({len(FAILED)}): " + ", ".join(FAILED))

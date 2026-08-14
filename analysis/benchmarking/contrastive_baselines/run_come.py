@@ -186,10 +186,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "COME is O((n_ref+n_query)^2); the refusal exists so a run "
                         "cannot burn a queue slot for hours before dying.")
     p.add_argument("--device", default="auto", choices=("auto", "cpu"),
-                   help="'auto' uses CUDA when available. NOTE: upstream builds "
-                        "full_mask on CPU while cross_mask lives on the model's "
-                        "device, so the GPU path may raise a device mismatch in "
-                        "ContrastiveLoss; 'cpu' is the safe fallback.")
+                   help="'auto' uses CUDA when available. Upstream builds its "
+                        "contrastive full_mask on the CPU while the embeddings "
+                        "live on the model's device, which makes its own GPU path "
+                        "raise a device mismatch; we patch that at import "
+                        "(device placement only -- see "
+                        "_patch_contrastive_device), so 'auto' works. 'cpu' "
+                        "remains available as a fallback and is bit-comparable, "
+                        "just far slower.")
     p.add_argument("--on_empty_cells", default="fail",
                    choices=("fail", "keep", "drop"),
                    help="what to do if a query slice contains cells with zero "
@@ -249,7 +253,63 @@ def _import_come(repo: Path):
         import train_eval          # noqa: E402
     finally:
         sys.argv = saved_argv
+    if _patch_contrastive_device(come_model):
+        LOG.info("patched ContrastiveLoss.forward to move the mask to the "
+                 "embeddings' device (upstream builds full_mask on the CPU; "
+                 "device placement only, objective unchanged)")
     return configure, come_model, come_utils, train_eval
+
+
+def _patch_contrastive_device(come_model) -> bool:
+    """Let ContrastiveLoss accept the mask upstream hands it on the WRONG device.
+
+    Upstream ``Model.loss_fn`` (model.py:119) builds
+
+        full_mask = torch.zeros(self._n1 + self._n2, self._n1 + self._n2)
+
+    with no ``device=``, so it lands on the CPU, while ``z1``/``z2`` and
+    ``cross_mask`` (``zeros_like(Coefficient)``) live on the model's device. The
+    slice-assignments that follow SURVIVE, because ``Tensor.__setitem__`` copies
+    cross-device -- which is why the failure is deferred -- but
+    ``ContrastiveLoss.forward`` then does
+    ``torch.mul(sim_exp, positive_mask)`` (model.py:170) across devices and
+    raises
+
+        RuntimeError: Expected all tensors to be on the same device,
+                      but found at least two devices, cuda:0 and cpu!
+
+    on EVERY CUDA run. Upstream's own experiments were evidently CPU-only here,
+    or on a torch old enough to be permissive.
+
+    Moving a float32 mask between devices is bit-preserving, so this is a
+    DEVICE-PLACEMENT fix and provably not a change to the objective: the mask
+    values, the similarity matrix and the reduction are all untouched. We patch
+    the imported class rather than editing the clone so the checkout stays
+    byte-identical to the pinned commit (setup_come_env.sh verifies that).
+
+    Two details that make this safe:
+      * upstream REBUILDS ``full_mask`` at the top of every ``loss_fn`` call and
+        never reads it again afterwards, and
+      * ``mask_pos_and_neg`` mutates the mask in place (``fill_diagonal_``).
+        After this patch that in-place write lands on our device copy instead of
+        the caller's tensor -- immaterial given the point above, and strictly
+        safer than mutating a tensor the caller still holds.
+
+    Returns True if the patch was applied (False if already patched).
+    """
+    orig = come_model.ContrastiveLoss.forward
+    if getattr(orig, "_scgg_device_patched", False):
+        return False
+
+    def forward(self, h1, h2, mask=None):
+        if mask is not None and getattr(mask, "device", None) is not None \
+                and mask.device != h1.device:
+            mask = mask.to(h1.device)
+        return orig(self, h1, h2, mask=mask)
+
+    forward._scgg_device_patched = True
+    come_model.ContrastiveLoss.forward = forward
+    return True
 
 
 def _make_adata(ad_mod, X: np.ndarray, obs: Dict[str, np.ndarray], var_names):
@@ -550,6 +610,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "artifact_frame": "original_microns",
         "on_empty_cells": args.on_empty_cells,
         "device": args.device,
+        # The upstream checkout is byte-identical to the pinned commit; this is
+        # applied to the IMPORTED class at runtime and is a device placement
+        # only, so it cannot change the objective or the predictions.
+        "upstream_patches": [
+            "ContrastiveLoss.forward: move the caller's mask to the embeddings' "
+            "device (upstream builds full_mask via torch.zeros with no device=, "
+            "so its own CUDA path raises in torch.mul at model.py:170)"
+        ],
         "torch_version": _torch_version(),
         "smoke_test": args.smoke_test,
         "status": "incomplete",
