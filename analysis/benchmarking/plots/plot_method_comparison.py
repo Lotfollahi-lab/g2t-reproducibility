@@ -1,6 +1,8 @@
 """plot_method_comparison.py
 
-Compare G2T (formerly scGG) vs LUNA vs CeLEry on the MMC cortex
+Compare G2T (formerly scGG) against every baseline that has been run —
+LUNA, CeLEry, and the two reviewer-requested contrastive baselines
+CellContrast and COME — on the MMC cortex
 benchmark across the full LUNA-paper metric battery — Spearman (mean
 of medians AND mean of means), contact precision / recall / F1, and
 three flavours of RSSD (absolute, mean-of-per-class,
@@ -26,9 +28,21 @@ CLI. The LUNA timestamps are AUTO-DISCOVERED from
 ``LUNA_INFERENCE_ROOT`` (they're the only method without a multi-mode
 ambiguity, so a glob-all default is safe there).
 
+CellContrast and COME are OPTIONAL: their timestamps are auto-discovered
+(``--cellcontrast_timestamps`` / ``--come_timestamps`` to pin), runs that
+are smoke tests / incomplete / manifest-less are dropped, and if no runs
+exist the method is simply omitted from the figure. COME is mmc_luna
+only — it is transductive with O((n_ref+n_query)^2) memory, so cns_luna
+is out of scope and its ``come_inference`` tree is permanently absent
+there. That absence is silent and affects no other method.
+
 Outputs (into OUT_DIR):
-    g2t_vs_luna_vs_celery_extended_metrics.{svg,pdf,png}  ← 2×4 panels
-    g2t_vs_luna_vs_celery_extended_metrics_processed.csv  ← long-form data
+    method_comparison_extended_metrics.{svg,pdf,png}  ← 2×4 panels
+    method_comparison_extended_metrics_processed.csv  ← long-form data
+
+(These were named ``g2t_vs_luna_vs_celery_extended_metrics*`` until the
+method list outgrew the filename; the stem is now method-agnostic and
+the drawn methods are named in the figure caption instead.)
 
 Per-panel design (mirrors the notebook AUC cell):
     - bar         = mean across seeds
@@ -146,7 +160,30 @@ DEFAULT_CELLCONTRAST_TIMESTAMPS: dict[str, list[str]] = {
     "cns_luna": [],
 }
 
+# COME (COntrastive MApping lEarning; Wei et al., Bioinformatics 41(3):btaf083,
+# 2025) — the second reviewer-requested contrastive baseline, run from the
+# authors' released code via contrastive_baselines/run_come.py. Same convention
+# as CellContrast: empty list = AUTO-DISCOVER, pin the canonical seeds here once
+# the sweep exists.
+#
+# cns_luna stays permanently empty and NO come_inference tree will ever exist
+# there: COME is transductive (a dense (n_spots x n_cells) coefficient matrix
+# refitted per reference/test-slice pair) with O((n_ref+n_query)^2) peak memory,
+# which is ~1.1 TB for cns_luna as the other methods run it, and still ~96 GB for
+# a 63,343-cell query against an EMPTY reference. The query term dominates, so
+# subsampling the reference cannot rescue it; the submitter refuses cns_luna. An
+# absent tree must therefore stay a silent, non-fatal state here.
+DEFAULT_COME_TIMESTAMPS: dict[str, list[str]] = {
+    "mmc_luna": [],
+    "cns_luna": [],
+}
+
 EXTENDED_METRICS_FILENAME = "extended_metrics.csv"
+
+# Basename (before any --suffix tag) of the figure + processed CSV written into
+# <ARTIFACTS_ROOT>/<dataset>/comparison_plots/. Deliberately method-agnostic:
+# see the comment at its use site in main().
+OUT_STEM = "method_comparison_extended_metrics"
 
 
 class MetricSpec(NamedTuple):
@@ -198,14 +235,17 @@ assert GRID_ROWS * GRID_COLS >= len(METRICS), \
 # Display name + colour per method. Order in this dict = top-to-bottom
 # order on the y-axis (top row plotted first). G2T on top because it's
 # the proposed method; LUNA next (the headline diffusion baseline);
-# CeLEry last (supervised-MLP baseline from the LUNA paper's Supp
-# Note 2).
+# CeLEry next (supervised-MLP baseline from the LUNA paper's Supp
+# Note 2); the reviewer-requested contrastive baselines are APPENDED after
+# those three so adding one never reorders the pre-existing rows. Methods
+# with no runs on disk are filtered out before plotting, so the y-axis only
+# ever shows methods that actually have data.
 #
 # Colour-blind-friendly palette: subset of Okabe-Ito (the de facto
 # standard for scientific figures — see Wong, "Points of view: Color
 # blindness", Nature Methods 8, 441 (2011); also recommended by Nature
 # for accessibility). The full 8-colour palette is reproduced for
-# reference in the comment block below; we picked three high-contrast
+# reference in the comment block below; we picked high-contrast
 # colours that stay distinguishable under deuteranopia (red-green),
 # protanopia, tritanopia, AND grayscale conversion. Verified with
 # the Coblis simulator.
@@ -228,6 +268,14 @@ METHODS: dict[str, str] = {
     # Okabe-Ito colourblind-safe palette, distinguishable from the three above
     # in both deuteranopia and greyscale.
     "CellContrast": "#CC79A7",
+    # Second reviewer-requested contrastive baseline (COME). Okabe-Ito black —
+    # the remaining choice that is unambiguous under all three dichromacies AND
+    # in greyscale. The other unused slots are worse: #E69F00 orange collapses
+    # towards #D55E00 vermillion (G2T) under deuteranopia, #56B4E9 sky blue
+    # towards #0072B2 blue (LUNA), and #F0E442 yellow is too light to read as a
+    # 35%-alpha bar. Appended LAST so the four pre-existing rows keep their
+    # established top-to-bottom order.
+    "COME": "#000000",
 }
 
 
@@ -485,7 +533,16 @@ def plot_panel(
     if show_ylabels:
         ax.set_yticklabels(methods, fontweight="medium")
     else:
-        ax.set_yticklabels([])
+        # Hide via tick PARAMS, never via ``set_yticklabels([])``. The panels
+        # are created with ``sharey=True``, and a shared y-axis means every
+        # Axes holds the SAME major Ticker object (``Axes.__init__`` does
+        # ``self.yaxis.major = sharey.yaxis.major``). Installing an empty
+        # FixedFormatter here therefore also wiped the labels off the leftmost
+        # panel, so the whole figure ended up identifying its bars by colour
+        # alone — verified in the rendered PNG before this fix. ``labelleft``
+        # is per-Axes tick state, so it hides these labels while leaving the
+        # formatter that column 0 installed intact.
+        ax.tick_params(axis="y", labelleft=False)
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -590,6 +647,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--come_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps to load from "
+            "come_inference/ for the COME baseline. Overrides "
+            "DEFAULT_COME_TIMESTAMPS; if both are empty the tree is "
+            "auto-discovered. Runs marked smoke_test, runs whose manifest "
+            "status is not \"complete\", and runs with no manifest at all are "
+            "always excluded. If no runs exist, COME is simply omitted from the "
+            "figure — which is the permanent state for cns_luna, where COME is "
+            "out of scope."
+        ),
+    )
+    p.add_argument(
         "--suffix",
         default="",
         help=(
@@ -599,7 +670,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "``compute_extended_metrics.py --suffix`` to render from "
             "a parallel CSV — e.g. ``--suffix gpu`` reads "
             "``extended_metrics_gpu.csv`` from each timestamp dir. "
-            "Output filenames (g2t_vs_luna_vs_celery_extended_metrics"
+            "Output filenames (method_comparison_extended_metrics"
             "<_suffix>.{svg,pdf,png}) get the same suffix so multiple "
             "backends produce side-by-side comparison figures."
         ),
@@ -610,9 +681,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _discover_timestamps(root: Path) -> list[str]:
     """Sorted immediate subdirs of ``root`` matching YYYYMMDD_HHMMSS[_suffix].
 
-    Used only for CellContrast, whose canonical seed set is not pinned yet.
-    Returns [] for a missing root rather than raising, so the caller can treat
-    "baseline not run" as a normal state.
+    Used for the two contrastive baselines (CellContrast, COME), whose canonical
+    seed sets are not pinned yet. Returns [] for a missing root rather than
+    raising, so the caller can treat "baseline not run" as a normal state — this
+    is what keeps a cns_luna run silent when come_inference/ does not exist.
     """
     if not root.exists():
         return []
@@ -643,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
     scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
     celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
     cc_root     = ARTIFACTS_ROOT / dataset / "cellcontrast_inference"
+    come_root   = ARTIFACTS_ROOT / dataset / "come_inference"
     out_dir     = ARTIFACTS_ROOT / dataset / "comparison_plots"
     print(f"[plot_metrics] dataset = {dataset}")
 
@@ -714,13 +787,44 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[plot_metrics] CellContrast: no runs found — omitted from figure")
 
+    # COME is OPTIONAL for exactly the same reason, and is PERMANENTLY absent on
+    # cns_luna (out of scope — see DEFAULT_COME_TIMESTAMPS). Discovery is guarded
+    # on exists() so a missing come_inference/ tree is silent and cannot drop or
+    # perturb any other method.
+    come_timestamps = (
+        _parse_ts_list(args.come_timestamps)
+        or list(DEFAULT_COME_TIMESTAMPS.get(dataset, []))
+        or (_discover_timestamps(come_root) if come_root.exists() else [])
+    )
+    # require_manifest: run_come.py always writes run_manifest.json before its
+    # first slice (status="incomplete") and flips status to "complete" only after
+    # the last slice, so a manifest-less dir is in-flight or crashed.
+    come_timestamps = _drop_smoke_test_timestamps(come_root, come_timestamps,
+                                                 require_manifest=True)
+    if come_timestamps:
+        print(f"[plot_metrics] COME: {len(come_timestamps)} run(s)")
+        frames.append(_collect("COME", come_root, come_timestamps, ext_filename))
+    else:
+        print("[plot_metrics] COME: no runs found — omitted from figure")
+
     df = pd.concat(frames, ignore_index=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     # Tag the output figure + processed CSV with the same suffix so
     # multiple backend renders can coexist in comparison_plots/.
     out_tag = f"_{suffix}" if suffix else ""
-    processed_path = out_dir / f"g2t_vs_luna_vs_celery_extended_metrics{out_tag}_processed.csv"
+    # Output basename. This used to be ``g2t_vs_luna_vs_celery_extended_metrics``,
+    # which enumerated three methods while the figure already drew four (and now
+    # up to five). Rather than growing the name every time a baseline is added —
+    # which would also make the filename depend on which trees happen to be
+    # populated, so the same command could write different files on different days
+    # — the stem is now method-agnostic and STABLE. The method list lives in the
+    # figure caption and the processed CSV, both of which are derived from the
+    # methods actually drawn. NOTE for downstream consumers: the old filename is
+    # gone; comparison_plots/ may still hold stale g2t_vs_luna_vs_celery_* files
+    # from before this change.
+    out_stem = f"{OUT_STEM}{out_tag}"
+    processed_path = out_dir / f"{out_stem}_processed.csv"
     df.to_csv(processed_path, index=False)
     print(f"[plot_metrics] saved processed CSV → {processed_path}")
 
@@ -752,7 +856,11 @@ def main(argv: list[str] | None = None) -> int:
     row_height       = 0.20              # was 0.22 — one extra method
                                          # (CeLEry) per panel; offset by
                                          # slightly shorter row height
-                                         # so the figure doesn't grow
+                                         # so the figure doesn't grow.
+                                         # fig_height scales with the
+                                         # ACTUAL n_methods, so the optional
+                                         # CellContrast/COME rows only add
+                                         # height when they have data.
     fig_width  = (panel_width + annotation_room) * GRID_COLS + 0.85
     fig_height = (n_methods * row_height + 0.55) * GRID_ROWS + 0.45
 
@@ -776,15 +884,24 @@ def main(argv: list[str] | None = None) -> int:
         axes_flat[k].set_visible(False)
 
     plt.tight_layout()
-    # Bottom margin sized so the per-method colour legend (drawn next)
-    # doesn't overlap the bottom row's tick labels.
+    # Bottom margin sized so the figure footer caption (drawn next) doesn't
+    # overlap the bottom row's tick labels. There is no separate colour legend:
+    # methods are named on the leftmost panel's y-axis and in the caption.
     plt.subplots_adjust(wspace=0.55, hspace=0.55, bottom=0.10)
 
-    # Single shared figure footer caption: identify the dataset + the
-    # number of seeds powering each method's bars.
-    n_g2t    = df.loc[df["method"] == "G2T",    "timestamp"].nunique()
-    n_luna   = df.loc[df["method"] == "LUNA",   "timestamp"].nunique()
-    n_celery = df.loc[df["method"] == "CeLEry", "timestamp"].nunique()
+    # Single shared figure footer caption: identify the dataset + the number of
+    # seeds powering each method's bars. Built from ``methods`` — the list that
+    # was actually DRAWN — rather than a hardcoded three-way string, which had
+    # already gone stale once (it said "G2T vs LUNA vs CeLEry" while four bars
+    # were being rendered) and would go stale again on every added baseline.
+    # ``methods`` preserves METHODS' declaration order, so the caption reads in
+    # the same top-to-bottom order as the bars.
+    seed_counts = {
+        m: int(df.loc[df["method"] == m, "timestamp"].nunique()) for m in methods
+    }
+    methods_caption = " vs ".join(
+        f"{m} ({seed_counts[m]} seeds)" for m in methods
+    )
     # Human-friendly dataset label for the caption — fall back to the
     # raw slug if we ever add a dataset the lookup doesn't know about.
     _DATASET_DISPLAY = {
@@ -794,13 +911,11 @@ def main(argv: list[str] | None = None) -> int:
     dataset_label = _DATASET_DISPLAY.get(dataset, dataset)
     fig.text(
         0.5, 0.03,
-        f"{dataset_label} — G2T ({n_g2t} seeds) vs LUNA ({n_luna} seeds) vs "
-        f"CeLEry ({n_celery} seeds). "
+        f"{dataset_label} — {methods_caption}. "
         f"Bar = mean across seeds, error bar = SEM, dots = individual seeds.",
         ha="center", va="center", fontsize=6.5, fontweight="medium",
     )
 
-    out_stem = f"g2t_vs_luna_vs_celery_extended_metrics{out_tag}"
     for ext in ("svg", "pdf", "png"):
         out_path = out_dir / f"{out_stem}.{ext}"
         fig.savefig(out_path, bbox_inches="tight", pad_inches=0.05)

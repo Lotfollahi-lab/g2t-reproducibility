@@ -36,9 +36,10 @@ is ``spearman_mean_of_medians`` (Fig. 3); we additionally write
 ``spearman_mean_of_means`` plus mean/median/std of every other metric.
 
 Usage:
-    # Score every method (default — uses DEFAULT_SCGG_TIMESTAMPS and
-    # DEFAULT_CELERY_TIMESTAMPS hard-coded below, plus auto-discovers
-    # every LUNA timestamp):
+    # Score the three headline methods — LUNA, G2T, CeLEry — which is the
+    # default (uses DEFAULT_SCGG_TIMESTAMPS and DEFAULT_CELERY_TIMESTAMPS
+    # hard-coded below, plus auto-discovers every LUNA timestamp). NOT every
+    # registered method: the contrastive baselines are opt-in, see below.
     python compute_extended_metrics.py
 
     # Score ONLY celery (luna + g2t already done in a prior run):
@@ -46,6 +47,11 @@ Usage:
 
     # Score luna + g2t but skip celery:
     python compute_extended_metrics.py --methods luna,g2t
+
+    # Reviewer-requested contrastive baselines — OPT-IN ONLY (neither is in
+    # _DEFAULT_METHODS, so a default run never touches their trees):
+    python compute_extended_metrics.py --methods cellcontrast
+    python compute_extended_metrics.py --methods come     # mmc_luna only
 
     # Override the default timestamp lists for one or more methods:
     python compute_extended_metrics.py \\
@@ -171,6 +177,21 @@ _METHOD_ALIASES = {
     # invocations don't start failing on a missing artifact dir — pass
     # ``--methods cellcontrast`` (or add it explicitly) to score it.
     "cellcontrast": "CellContrast",
+    # Second reviewer-requested contrastive baseline (COntrastive MApping
+    # lEarning; Wei et al., Bioinformatics 41(3):btaf083, 2025), run from the
+    # authors' released code via contrastive_baselines/run_come.py. Same opt-in
+    # rule as cellcontrast: deliberately NOT in _DEFAULT_METHODS, so a default
+    # invocation never touches come_inference/ and cannot start failing on a
+    # tree that does not exist. Pass ``--methods come`` to score it.
+    #
+    # SCOPE: COME is mmc_luna ONLY. It is transductive (MapNet.Coefficient is a
+    # dense (n_spots x n_cells) nn.Parameter refitted per (reference, test
+    # slice) pair) with O((n_ref+n_query)^2) peak memory, so cns_luna is
+    # infeasible (~1.1 TB as the other methods run it; a 63,343-cell query
+    # needs ~96 GB even against an EMPTY reference, i.e. the query term
+    # dominates and shrinking the reference cannot rescue it). The submitter
+    # refuses cns_luna, so no come_inference tree will ever exist there.
+    "come":         "COME",
 }
 _DEFAULT_METHODS = ["luna", "g2t", "celery"]
 
@@ -460,7 +481,10 @@ def _score_one_slice(
       * LUNA and G2T write BOTH files in the per-slice [-0.5, 0.5] frame — truth
         is normalised at load (``data_module.py:51``) and the prediction is
         independently re-normalised (``test.py:274``).
-      * CeLEry, novosparc and CellContrast write ORIGINAL MICRONS.
+      * CeLEry, novosparc, CellContrast and COME write ORIGINAL MICRONS
+        (run_come.py records ``"artifact_frame": "original_microns"`` in its
+        manifest — it inverts the read-out's normalised frame back to the test
+        slice's microns before writing).
 
     ``compute_kabsch_rssd`` fits a ROTATION ONLY (``luna_metrics.py:662``
     ``R.align_vectors`` — no scale, no translation), so it is homogeneous of
@@ -615,7 +639,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=",".join(_DEFAULT_METHODS),
         help=(
             "Comma-separated subset of methods to score. Tokens: "
-            "luna, g2t (alias scgg), celery. Default scores all three. "
+            "luna, g2t (alias scgg), celery, cellcontrast, come. Default "
+            "scores luna,g2t,celery — the two contrastive baselines are "
+            "opt-in so a default run cannot fail on an un-run tree. "
             "Use this to skip methods you've already scored — e.g. "
             "``--methods celery`` re-scores ONLY celery_inference/, "
             "leaving the existing luna_inference/extended_metrics.csv "
@@ -664,6 +690,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "<cellcontrast_inference>. If omitted, AUTO-DISCOVERS the tree "
             "(these runs are new, so there is no DEFAULT_* list). Runs whose "
             "run_manifest.json marks them smoke_test are always excluded."
+        ),
+    )
+    p.add_argument(
+        "--come_timestamps",
+        default=None,
+        help=(
+            "Comma-separated YYYYMMDD_HHMMSS timestamps under "
+            "<come_inference>. If omitted, AUTO-DISCOVERS the tree (same as "
+            "--cellcontrast_timestamps — these runs are new, so there is no "
+            "DEFAULT_* list). Runs whose run_manifest.json marks them "
+            "smoke_test, whose status is not \"complete\", or which have no "
+            "manifest at all are always excluded. COME is mmc_luna only."
         ),
     )
     p.add_argument(
@@ -726,8 +764,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Coordinate frame used for scoring. The methods do NOT write their "
             "metadata CSVs in a common frame: LUNA/G2T write the per-slice "
             "[-0.5,0.5] frame (truth normalised at data_module.py:51, prediction "
-            "re-normalised at test.py:274) while CeLEry, novosparc and "
-            "CellContrast write original microns. compute_kabsch_rssd fits a "
+            "re-normalised at test.py:274) while CeLEry, novosparc, "
+            "CellContrast and COME write original microns. compute_kabsch_rssd fits a "
             "rotation only (no scale), so it is homogeneous of degree 1 in "
             "coordinate scale and RSSD is NOT comparable across those groups -- "
             "this is why the checked-in mmc_luna table shows G2T 76 / LUNA 77 but "
@@ -785,8 +823,9 @@ def _parse_ts_list(s: str | None) -> list[str] | None:
 
 def _parse_methods(s: str) -> list[str]:
     """Validate + canonicalise --methods. Returns a list of *canonical*
-    labels (``LUNA``, ``G2T``, ``CeLEry``) preserving the user's order so
-    log output reads in the order they asked for."""
+    labels (``LUNA``, ``G2T``, ``CeLEry``, ``CellContrast``, ``COME``)
+    preserving the user's order so log output reads in the order they asked
+    for."""
     tokens = [t.strip().lower() for t in s.split(",") if t.strip()]
     if not tokens:
         raise ValueError("--methods parsed to empty list")
@@ -818,6 +857,7 @@ def main(argv: list[str] | None = None) -> int:
     scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
     celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
     cellcontrast_root = ARTIFACTS_ROOT / dataset / "cellcontrast_inference"
+    come_root = ARTIFACTS_ROOT / dataset / "come_inference"
     print(f"[compute_extended] dataset = {dataset}")
 
     # Build the (method_label, root, timestamps) work list, scoping each
@@ -826,6 +866,8 @@ def main(argv: list[str] | None = None) -> int:
     #     if that's empty, fall back to auto-discovering the tree.
     #   - G2T:  explicit list, else DEFAULT_SCGG_TIMESTAMPS[dataset].
     #   - CeLEry: explicit list, else DEFAULT_CELERY_TIMESTAMPS[dataset].
+    #   - CellContrast / COME: explicit list, else auto-discover the tree,
+    #     then drop smoke-test / incomplete / manifest-less runs.
     # Only methods in ``selected`` are added to the work list — others
     # are silently skipped (their already-existing extended_metrics.csv
     # is left untouched).
@@ -882,6 +924,42 @@ def main(argv: list[str] | None = None) -> int:
                 f"--cellcontrast_timestamps."
             )
         work.append(("CellContrast", cellcontrast_root, cc_ts))
+    if "COME" in selected:
+        # Second reviewer-requested baseline, produced by
+        # contrastive_baselines/run_come.py. Exactly parallel to CellContrast:
+        # no DEFAULT_* list, so auto-discover the tree unless an explicit list
+        # is given.
+        #
+        # A MISSING come_inference tree is a NORMAL state (COME is mmc_luna
+        # only, and even on mmc_luna it may simply not have been run yet), so
+        # discovery is guarded on ``exists()`` rather than letting
+        # _discover_timestamps raise FileNotFoundError — that way the user who
+        # explicitly asked for ``--methods come`` gets the actionable
+        # "run submit_come.sh first" message below instead of a bare stat error.
+        # A default run never reaches this branch at all, so an absent tree is
+        # silent for both datasets.
+        come_ts = _parse_ts_list(args.come_timestamps)
+        if come_ts is None:
+            come_ts = _discover_timestamps(come_root) if come_root.exists() else []
+        # require_manifest: run_come.py ALWAYS writes run_manifest.json before
+        # its first slice (with status="incomplete") and flips status to
+        # "complete" only after the last slice, so a manifest-less dir is
+        # in-flight or crashed and an incomplete one was killed part-way
+        # through. Either would otherwise be averaged in as if it were a full
+        # 14-section run.
+        come_ts = _drop_smoke_test_timestamps(come_root, come_ts,
+                                              require_manifest=True)
+        if not come_ts:
+            raise RuntimeError(
+                f"No COME timestamps for dataset={dataset!r} under {come_root} "
+                f"(smoke-test, incomplete and manifest-less runs are excluded). "
+                f"COME is mmc_luna ONLY — it is transductive with "
+                f"O((n_ref+n_query)^2) memory, so cns_luna is out of scope and "
+                f"its submitter refuses it. On mmc_luna, run "
+                f"contrastive_baselines/submit_come.sh first, or pass "
+                f"--come_timestamps."
+            )
+        work.append(("COME", come_root, come_ts))
 
     if not work:
         # Defensive: _parse_methods enforces non-empty, but if the
@@ -949,8 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
         print("[compute_extended] NOTE: both metadata CSVs are min-max "
               "normalised per slice before scoring, so RSSD is comparable "
               "across methods that write different coordinate frames "
-              "(LUNA/G2T write [-0.5,0.5]; CeLEry/novosparc/CellContrast write "
-              "microns). This CHANGES previously published CeLEry/novosparc "
+              "(LUNA/G2T write [-0.5,0.5]; CeLEry/novosparc/CellContrast/COME "
+              "write microns). This CHANGES previously published CeLEry/novosparc "
               "numbers -- re-score every method in one pass and state the frame "
               "in the write-up. Pass --rssd_frame as_written for the old "
               "behaviour.")

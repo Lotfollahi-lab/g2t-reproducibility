@@ -2,14 +2,26 @@
 """benchmark_paired_stats.py
 
 Paired significance test for the HEADLINE comparison G2T vs LUNA vs CeLEry (the
-one the paper actually claims), mirroring ablation_paired_stats.py so both the
-benchmark table and the ablation table (Table 1) use the IDENTICAL paired t-test.
+one the paper actually claims) plus the reviewer-requested contrastive baselines
+CellContrast and COME when they have runs on disk, mirroring
+ablation_paired_stats.py so both the benchmark table and the ablation table
+(Table 1) use the IDENTICAL paired t-test.
 
 For each dataset it loads the per-seed ``extended_metrics.csv`` behind Figs 2/3
 (the same timestamp lists plot_method_comparison.py plots), pairs each baseline
 method to G2T BY SEED (seed = position in the method's ordered timestamp list;
 all methods share the same fixed test split), and runs a two-sided paired t-test
-of G2T vs LUNA and G2T vs CeLEry on the shared seeds.
+of G2T vs each comparator on THAT PAIR's shared seeds.
+
+CellContrast and COME are optional: no seed set is pinned for them yet, so their
+trees are auto-discovered and smoke-test / incomplete / manifest-less runs are
+dropped. If a tree is absent the method is simply excluded — which is the
+permanent state for COME on cns_luna, where it is out of scope. Because the
+shared-seed intersection is computed PER PAIR, and because an optional baseline
+with fewer than 2 usable runs is excluded with a warning rather than aborting the
+run, an absent or partial contrastive baseline cannot move — or suppress — the
+G2T-vs-LUNA or G2T-vs-CeLEry p-values. A PINNED method with <2 seeds is still a
+hard error.
 
     python benchmark_paired_stats.py --dataset mmc_luna
     python benchmark_paired_stats.py --dataset cns_luna
@@ -38,10 +50,19 @@ METRICS = {
 }
 EXTENDED_METRICS_FILENAME = "extended_metrics.csv"
 
+# Methods whose seed set is DISCOVERED from disk rather than pinned above, i.e.
+# the reviewer-requested contrastive baselines. They are optional in both
+# directions: absent -> excluded, and (see main()) too few complete runs for a
+# paired test -> excluded with a warning instead of taking the whole table down.
+_OPTIONAL_METHODS = ("CellContrast", "COME")
+
 # Canonical per-dataset, per-method seed timestamps. Imported from
 # plot_method_comparison.py when possible (single source of truth); the
 # hardcoded fallback below is a verbatim copy for when that module's heavy
 # imports (matplotlib) are unavailable. KEEP IN SYNC with that file.
+# NOTE: CellContrast and COME are absent from both dicts on purpose — neither has
+# a pinned canonical seed set yet, so both are discovered from disk instead (see
+# _discover_manifest_runs).
 ARTIFACTS_ROOT = Path("/nfs/team361/sb75/scgg-reproducibility/artifacts")
 _FALLBACK = {
     "scgg": {
@@ -103,11 +124,17 @@ def stars(p):
     return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
 
 
-def _discover_cellcontrast(root: Path):
-    """Timestamps under a cellcontrast_inference root, excluding smoke tests.
+def _discover_manifest_runs(root: Path, label: str = "run"):
+    """Timestamps under a manifest-writing method's inference root.
 
-    Returns [] for a missing root so an un-run baseline is a normal state
-    rather than an error.
+    Used for the reviewer-requested contrastive baselines (CellContrast, COME),
+    whose wrappers both ALWAYS write ``run_manifest.json`` before their first
+    slice. Drops smoke tests, runs whose ``status`` is not "complete", and runs
+    with no manifest at all.
+
+    Returns [] for a missing root so an un-run baseline is a normal state rather
+    than an error. That is the permanent state for COME on cns_luna, which is out
+    of scope for it (transductive, O((n_ref+n_query)^2) memory).
     """
     if not root.exists():
         return []
@@ -120,26 +147,28 @@ def _discover_cellcontrast(root: Path):
             try:
                 m = json.loads(manifest.read_text())
                 if bool(m.get("smoke_test")):
-                    print(f"[bench-stats] skipping smoke-test run {p.name}",
-                          file=sys.stderr)
+                    print(f"[bench-stats] {label}: skipping smoke-test run "
+                          f"{p.name}", file=sys.stderr)
                     continue
-                # run_cellcontrast.py writes the manifest BEFORE its slice loop
-                # and flips status to "complete" only after the last slice, so a
-                # run killed by wall clock or OOM is detectable here. Averaging
-                # one in would mix a 2-4 section run into 14-section means.
+                # run_cellcontrast.py / run_come.py write the manifest BEFORE
+                # their slice loop and flip status to "complete" only after the
+                # last slice, so a run killed by wall clock or OOM is detectable
+                # here. Averaging one in would mix a 2-4 section run into
+                # 14-section means.
                 status = m.get("status")
                 if status is not None and str(status) != "complete":
-                    print(f"[bench-stats] skipping incomplete run {p.name} "
-                          f"(status={status!r})", file=sys.stderr)
+                    print(f"[bench-stats] {label}: skipping incomplete run "
+                          f"{p.name} (status={status!r})", file=sys.stderr)
                     continue
             except Exception as exc:
                 print(f"[bench-stats] WARN unreadable {manifest}: {exc}",
                       file=sys.stderr)
         else:
-            # This method always writes a manifest, so its absence means the run
+            # These methods always write a manifest, so its absence means the run
             # is in flight or died before it got there.
-            print(f"[bench-stats] skipping {p.name}: no run_manifest.json "
-                  f"(in-flight or crashed run)", file=sys.stderr)
+            print(f"[bench-stats] {label}: skipping {p.name}: no "
+                  f"run_manifest.json (in-flight or crashed run)",
+                  file=sys.stderr)
             continue
         out.append(p.name)
     return out
@@ -184,7 +213,8 @@ def main() -> int:
     roots = {"G2T": ARTIFACTS_ROOT / ds / "scgg_inference",
              "LUNA": ARTIFACTS_ROOT / ds / "luna_inference",
              "CeLEry": ARTIFACTS_ROOT / ds / "celery_inference",
-             "CellContrast": ARTIFACTS_ROOT / ds / "cellcontrast_inference"}
+             "CellContrast": ARTIFACTS_ROOT / ds / "cellcontrast_inference",
+             "COME": ARTIFACTS_ROOT / ds / "come_inference"}
     ts_scgg = list(_TS["scgg"].get(ds, []))
     ts_luna = list(_TS["luna"].get(ds, [])) or _discover_luna_timestamps(roots["LUNA"])
     ts_cel = list(_TS["celery"].get(ds, []))
@@ -194,15 +224,32 @@ def main() -> int:
     # CellContrast is optional: include it only if runs exist, so this script
     # keeps working unchanged before the baseline has been run. No pinned seed
     # set yet, so discover the tree and drop smoke-test runs.
-    ts_cc = _discover_cellcontrast(roots["CellContrast"])
+    ts_cc = _discover_manifest_runs(roots["CellContrast"], "CellContrast")
     if ts_cc:
         print(f"[bench-stats] CellContrast: {len(ts_cc)} run(s) discovered")
         data["CellContrast"] = load_method(roots["CellContrast"], ts_cc)
     else:
         print("[bench-stats] CellContrast: no runs found — excluded")
+    # COME is optional for the same reason, and is PERMANENTLY absent on
+    # cns_luna: it is transductive (a dense (n_spots x n_cells) coefficient
+    # matrix refitted per reference/test-slice pair) with O((n_ref+n_query)^2)
+    # peak memory, so cns_luna is out of scope and its submitter refuses it.
+    # A missing come_inference tree therefore must not raise and must not
+    # perturb the other methods' seed sets — which it cannot, because each
+    # pair's shared seeds are computed pairwise below rather than as one global
+    # intersection.
+    ts_come = _discover_manifest_runs(roots["COME"], "COME")
+    if ts_come:
+        print(f"[bench-stats] COME: {len(ts_come)} run(s) discovered")
+        data["COME"] = load_method(roots["COME"], ts_come)
+    else:
+        print("[bench-stats] COME: no runs found — excluded")
 
     ref = args.reference
-    others = [m for m in ("G2T", "LUNA", "CeLEry", "CellContrast")
+    if ref not in data:
+        raise SystemExit(f"--reference {ref!r} is not one of the methods loaded "
+                         f"for dataset={ds!r}: {sorted(data)}")
+    others = [m for m in ("G2T", "LUNA", "CeLEry", "CellContrast", "COME")
               if m != ref and m in data]
     # Each reference-vs-comparator test uses THAT PAIR's shared seeds. Using a
     # single global intersection across every method present would let an
@@ -218,6 +265,27 @@ def main() -> int:
     for m in others:
         print(f"[bench-stats]   {ref} vs {m}: {len(pair_seeds[m])} paired "
               f"seed(s) {pair_seeds[m]}")
+    # A paired t-test needs >=2 shared seeds. What to do about a comparator that
+    # has fewer depends on whether its seed set is PINNED or DISCOVERED:
+    #   * pinned (G2T / LUNA / CeLEry): hard error. Those lists are canonical, so
+    #     a short one means the tree does not hold what the paper claims and the
+    #     table must not be written at all.
+    #   * discovered (_OPTIONAL_METHODS): drop it with a loud warning. One
+    #     complete run is a NORMAL in-flight state while a contrastive-baseline
+    #     sweep is landing, and aborting would take the entire table — including
+    #     the headline G2T vs LUNA row — down with it. Zero runs is already
+    #     handled exactly this way above ("no runs found — excluded"); treating
+    #     one run as fatal while zero is benign was an inconsistency, not a
+    #     safety guard. The comparator is ABSENT from the table rather than
+    #     reported from an invalid n, and the warning says how to get it back.
+    thin_optional = [m for m in others
+                     if m in _OPTIONAL_METHODS and len(pair_seeds[m]) < 2]
+    for m in thin_optional:
+        print(f"[bench-stats] WARN {m}: only {len(pair_seeds[m])} seed(s) shared "
+              f"with {ref}; a paired t-test needs >=2, so {m} is EXCLUDED from "
+              f"this table. Re-run once >=2 of its runs are complete.",
+              file=sys.stderr)
+    others = [m for m in others if m not in thin_optional]
     thin = [m for m in others if len(pair_seeds[m]) < 2]
     if thin:
         raise SystemExit(
