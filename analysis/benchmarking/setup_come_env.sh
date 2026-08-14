@@ -45,7 +45,7 @@
 #   REPO_DIR        = <this dir>/COME                      authors' code
 #   REPO_COMMIT     = 2005812810f3...  (upstream main, pinned — see below)
 #   PYTHON_VERSION  = 3.10    (see the note where it is set)
-#   TORCH_VERSION   = 2.5.1   (cu121; see the torch.load discussion below)
+#   TORCH_MAX       = <2.6    (cu121; a CEILING not an exact pin -- see below)
 #   SCANPY_VERSION  = 1.10.4
 #   NUMPY_SPEC      = numpy>=1.26,<2
 #   LOCKFILE        = <VENV_DIR>/requirements.lock         resolved pins
@@ -120,26 +120,36 @@ SCANPY_VERSION="${SCANPY_VERSION:-1.10.4}"
 # verification below will tell you whether the binary deps agree.
 NUMPY_SPEC="${NUMPY_SPEC:-numpy>=1.26,<2}"
 # torch. Upstream pins nothing beyond "1.6+" and its README tells you to pick a
-# CUDA build from pytorch.org, so the choice is ours; we pin it EXACTLY because
-# "the COME baseline" must mean one build.
+# CUDA build from pytorch.org, so the choice is ours.
 #
 # ON THE torch>=2.6 weights_only FLIP — checked in COME's source, not assumed:
 #   train_eval.py:167  torch.save(model.state_dict(), model_path)   # pretrain
 #   train_eval.py:197  torch.save(model.state_dict(), model_path)   # train
 #   train_eval.py:109  model.ae.load_state_dict(torch.load(pretrain_path))
 # Everything COME writes and reads back is a plain state_dict — an OrderedDict of
-# tensors, which torch.load accepts under weights_only=True. run_come.py:427 does
-# the same. So COME is NOT exposed to the 2.6 default change; that ceiling was
+# tensors, which torch.load accepts under weights_only=True. run_come.py does the
+# same. So COME is NOT exposed to the 2.6 default change; that ceiling was
 # CellContrast's problem (it pickles a pandas Index into its checkpoint and dies
 # at inference), and copying its `<2.6` rationale here would be wrong.
-# We nonetheless pin 2.5.1 rather than "newest": the cu121 index tops out at
-# torch 2.5.1 (verified 2026-08-14: cp310 wheels run 2.2.1 ... 2.5.1), and cu121
-# is the CUDA build the rest of this project's envs are validated against. Going
-# above 2.6 would mean a different CUDA index, not a correctness fix — and the
-# functional check below actually exercises the save/load round trip on whatever
-# torch is resolved, so a future bump is verified rather than argued about.
-TORCH_VERSION="${TORCH_VERSION:-2.5.1}"
-TORCH_SPEC="${TORCH_SPEC:-torch==$TORCH_VERSION --index-url https://download.pytorch.org/whl/cu121}"
+#
+# WHY A CEILING AND NOT AN EXACT PIN — this script previously pinned
+# `torch==2.5.1` and was UNSATISFIABLE. torch 2.5.1+cu121 declares
+# `nvidia-cudnn-cu12==9.1.0.70`, and that exact cuDNN build is NOT on the cu121
+# index (verified 2026-08-14: it carries 9.0.0.312 and 9.1.1.17, skipping
+# 9.1.0.70, which exists only on PyPI). Because `--index-url` REPLACES PyPI
+# rather than adding to it, the dependency cannot be found and uv reports
+# "no solution found ... torch==2.5.1+cu121 cannot be used".
+# A CEILING fixes it the way setup_cellcontrast_env.sh already does: the resolver
+# is free to back off to a build whose whole dependency closure IS on that index
+# (the cu121 index carries 2.1.0 ... 2.5.1, so 2.5.0 / 2.4.1 are available).
+# We keep `<2.6` purely to match the CellContrast env and to stay on the cu121
+# line the rest of this project is validated against -- NOT for weights_only,
+# which as established above does not apply to COME. The functional check below
+# exercises the actual save/load round trip on whatever torch is resolved, so a
+# future bump is verified rather than argued about, and the lockfile records the
+# build that was actually used.
+TORCH_MAX="${TORCH_MAX:-<2.6}"
+TORCH_SPEC="${TORCH_SPEC:-torch$TORCH_MAX --index-url https://download.pytorch.org/whl/cu121}"
 SKIP_CLONE="${SKIP_CLONE:-0}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
 SKIP_FUNCTIONAL="${SKIP_FUNCTIONAL:-0}"
@@ -290,14 +300,15 @@ UV_PIP=(uv pip install --python "$VENV_DIR/bin/python")
 #    the env must not break because a future scanpy drops a dependency (seaborn
 #    is the live example — see the header).
 # ---------------------------------------------------------------------------
-# Apply the exact version to whatever TORCH_SPEC holds, so the documented CPU
-# escape hatch (TORCH_SPEC="torch") gets the same build as the CUDA default: a
-# bare `torch` token becomes `torch==$TORCH_VERSION`; a constraint the caller
-# wrote themselves is left alone, and so are the index-url flags.
+# Apply the ceiling to whatever TORCH_SPEC holds, so the documented CPU escape
+# hatch (TORCH_SPEC="torch") gets it too and not just the CUDA default: a bare
+# `torch` token becomes `torch$TORCH_MAX`; a constraint the caller wrote
+# themselves is left alone, and so are the index-url flags. Identical to
+# setup_cellcontrast_env.sh, deliberately.
 TORCH_ARGS=()
 # shellcheck disable=SC2086  # TORCH_SPEC is a command line; word-splitting is the point
 for _tok in $TORCH_SPEC; do
-    [[ "$_tok" == "torch" ]] && _tok="torch==$TORCH_VERSION"
+    [[ "$_tok" == "torch" ]] && _tok="torch$TORCH_MAX"
     TORCH_ARGS+=("$_tok")
 done
 
@@ -312,7 +323,7 @@ log "installing scanpy==$SCANPY_VERSION with '$NUMPY_SPEC' plus anndata, pandas,
 # 4. Verify — every import the upstream package actually makes
 # ---------------------------------------------------------------------------
 log "verifying ..."
-COME_EXPECT_TORCH="$TORCH_VERSION" COME_NUMPY_SPEC="$NUMPY_SPEC" \
+COME_TORCH_MAX="$TORCH_MAX" COME_NUMPY_SPEC="$NUMPY_SPEC" \
 "$VENV_DIR/bin/python" - <<'PY'
 import importlib, os, re, sys
 # Enumerated from upstream itself, at the pinned commit:
@@ -377,16 +388,44 @@ except Exception as e:
 # torch>=2.6 weights_only default does NOT break it — unlike CellContrast, whose
 # checkpoint carries a pandas Index. What matters here is only that we got the
 # build we asked for; the functional check below proves the round trip.
-want = os.environ.get("COME_EXPECT_TORCH", "")
+# We declare a CEILING (TORCH_MAX, default "<2.6"), not an exact build -- an
+# exact pin on this index is unsatisfiable, see the TORCH_MAX comment near the
+# top -- so verify the ceiling holds rather than an equality.
+want = os.environ.get("COME_TORCH_MAX", "").strip()
 try:
     import torch as _t
     got = str(_t.__version__)
-    if want and not got.startswith(want):
-        print(f"  WARN torch {got} != pinned {want}. Fine if you overrode "
-              f"TORCH_SPEC/TORCH_VERSION on purpose; otherwise the resolve "
-              f"drifted and the recorded env is not the one in the methods.")
+
+    def _rel(v):
+        # "2.5.0+cu121" -> (2, 5, 0); ignore the local/CUDA suffix.
+        base = v.split("+")[0].split("rc")[0]
+        out = []
+        for part in base.split(".")[:3]:
+            digits = "".join(c for c in part if c.isdigit())
+            out.append(int(digits) if digits else 0)
+        while len(out) < 3:
+            out.append(0)
+        return tuple(out)
+
+    ok, bound = True, ""
+    for op in ("<=", ">=", "==", "!=", "<", ">"):
+        if want.startswith(op):
+            bound = want[len(op):].strip()
+            a, b = _rel(got), _rel(bound)
+            ok = {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b,
+                  "==": a == b, "!=": a != b}[op]
+            break
+    if want and not bound:
+        print(f"  NOTE torch {got}: TORCH_MAX '{want}' has no recognised "
+              f"comparator; not checked")
+    elif not want:
+        print(f"  OK   torch {got} (no ceiling declared)")
+    elif ok:
+        print(f"  OK   torch {got} satisfies TORCH_MAX '{want}'")
     else:
-        print(f"  OK   torch {got} (pinned {want or 'unpinned'})")
+        print(f"  WARN torch {got} VIOLATES TORCH_MAX '{want}'. Fine if you "
+              f"overrode TORCH_SPEC on purpose; otherwise the resolve drifted "
+              f"and the recorded env is not the one in the methods.")
     mj, mn = (int(p) for p in got.split(".")[:2])
     if (mj, mn) >= (2, 6):
         print("  NOTE torch>=2.6 defaults torch.load to weights_only=True. "
