@@ -71,6 +71,27 @@ def permute_within(df: pd.DataFrame, gene_cols: list, by: list, rng) -> pd.DataF
     return out
 
 
+def class_mean_profiles(df: pd.DataFrame, gene_cols: list) -> pd.DataFrame:
+    """Replace every cell's profile with the mean profile of its class.
+
+    THE cell-type-only predictor, built as an input ablation rather than as a
+    separate baseline. The model then holds nothing but cell-type identity, yet
+    runs through the same architecture, read-out and metric -- so there is no
+    strawman to design, and no argument about whether the baseline was made
+    deliberately weak.
+
+    Means are taken WITHIN each test section. A class mean cannot encode any
+    individual cell's position (it is averaged over every cell of that class
+    wherever it sits), so no positional information leaks; taking means within
+    the section instead of from the training split simply avoids introducing a
+    train/test batch difference on top of the ablation.
+    """
+    out = df.copy()
+    out[gene_cols] = (df.groupby(["cell_section", "cell_class"], observed=True)[gene_cols]
+                        .transform("mean"))
+    return out
+
+
 def fixed_point_rate(a: pd.DataFrame, b: pd.DataFrame, gene_cols: list) -> float:
     """Fraction of cells whose profile is unchanged after permutation."""
     same = np.all(a[gene_cols].to_numpy() == b[gene_cols].to_numpy(), axis=1)
@@ -103,6 +124,7 @@ def main() -> int:
 
     conds = {
         "real": df,
+        "class_mean": class_mean_profiles(df, gene_cols),
         "shuffle_type": permute_within(df, gene_cols, ["cell_section", "cell_class"], rng),
         "shuffle_all": permute_within(df, gene_cols, ["cell_section"], rng),
     }
