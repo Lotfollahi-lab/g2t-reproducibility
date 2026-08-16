@@ -627,11 +627,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--dataset",
         default=DEFAULT_DATASET,
-        choices=VALID_DATASETS,
         help=(
             f"Dataset slug (subdir of {ARTIFACTS_ROOT}). Default "
             f"{DEFAULT_DATASET!r}. Selects both the inference roots "
-            f"to score AND the DEFAULT_*_TIMESTAMPS dicts' keys."
+            f"to score AND the DEFAULT_*_TIMESTAMPS dicts' keys. "
+            f"Any existing subdir is accepted -- {VALID_DATASETS} are the "
+            "ones with DEFAULT_*_TIMESTAMPS entries, so anything else needs "
+            "explicit --<method>_timestamps. Validated against the "
+            "filesystem below rather than a whitelist, so new splits do not "
+            "require editing this file."
         ),
     )
     p.add_argument(
@@ -853,6 +857,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve dataset-derived paths + default timestamp lists.
     dataset = args.dataset
+    # Replaces the old choices=VALID_DATASETS whitelist. That whitelist
+    # existed to catch typos, but every new split (xenium_bk20_pca50,
+    # xenium_2slice, ...) required editing this file to score it. An
+    # existence check catches the same typos and lists the real options.
+    if not (ARTIFACTS_ROOT / dataset).is_dir():
+        available = sorted(d.name for d in ARTIFACTS_ROOT.iterdir()
+                           if d.is_dir()) if ARTIFACTS_ROOT.is_dir() else []
+        raise SystemExit(
+            f"--dataset {dataset!r}: no such directory under {ARTIFACTS_ROOT}.\n"
+            "Available: " + (", ".join(available) if available else "(none)"))
     luna_root   = ARTIFACTS_ROOT / dataset / "luna_inference"
     scgg_root   = ARTIFACTS_ROOT / dataset / "scgg_inference"
     celery_root = ARTIFACTS_ROOT / dataset / "celery_inference"
