@@ -362,7 +362,7 @@ def _score_timestamp(
     vectorized: bool = False,
     backend: str = "scipy",
     workers: int = 1,
-    rssd_frame: str = "per_slice_norm",
+    rssd_frame: str = "luna",
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     """Score every slice under one <TS> dir; return per-slice df + aggregate.
 
@@ -466,7 +466,7 @@ def _score_one_slice(
     ts: str,
     method_label: str,
     backend: str,
-    rssd_frame: str = "per_slice_norm",
+    rssd_frame: str = "luna",
 ) -> Dict[str, float]:
     """Score one slice. Pure function — picklable for multiprocessing.
 
@@ -494,12 +494,21 @@ def _score_one_slice(
     CeLEry 36,993,780 (~55,000x) — those gaps are dominated by UNITS, not by
     accuracy, and any cross-method RSSD claim built on them is invalid.
 
-      * ``per_slice_norm`` (default): min-max both arrays per slice before
-        scoring, each by its OWN bounding box. This reproduces LUNA's convention
-        exactly for every method, so RSSD becomes scale- and offset-invariant and
-        comparable. It is near-idempotent for LUNA/G2T (their CSVs are already in
-        that frame), so their historical numbers are essentially unchanged, while
-        the micron-frame methods drop to a comparable magnitude.
+      * ``luna`` (default): reproduce EXACTLY the frame LUNA/G2T write, for every
+        method. Measured on mmc_luna (7 Oct 2026): their metadata_true has span
+        1 per axis with centroid exactly 0 but bbox-centre ~(-0.025, -0.002) —
+        min-max normalised to [-0.5, 0.5] by the data module, then MEAN-CENTRED
+        by the training pipeline; their metadata_pred has span 1 with
+        bbox-centre exactly 0 — min-max normalised by test.py, NOT re-centred.
+        So: truth = min-max, then subtract its centroid; pred = min-max. This is
+        EXACTLY idempotent for LUNA/G2T (min-max of a span-1 array is a pure
+        shift; re-centring undoes it), so their published RSSD is unchanged,
+        and it puts micron-frame methods in LUNA's own evaluation frame.
+      * ``per_slice_norm``: min-max both arrays by their own bbox, no
+        centring. NOT idempotent for LUNA/G2T: it un-centres their truth, and
+        because the Kabsch fit is rotation-only that alone raised G2T/LUNA
+        Sum RSSD by ~1.7% on mmc_luna (76.10 -> 77.40, 77.30 -> 78.53) while
+        leaving Spearman/F1 unchanged. Kept for comparison only.
       * ``as_written``: the old behaviour. Only meaningful WITHIN a group that
         shares a frame.
 
@@ -509,7 +518,11 @@ def _score_one_slice(
     frame, and it is applied identically to all of them.
     """
     coords_true, coords_pred, cell_class, slice_name = _load_pair(slice_dir)
-    if rssd_frame == "per_slice_norm":
+    if rssd_frame == "luna":
+        coords_true = _position_normalize(coords_true)
+        coords_true = coords_true - coords_true.mean(axis=0)  # pipeline mean-centres truth
+        coords_pred = _position_normalize(coords_pred)        # test.py: min-max only
+    elif rssd_frame == "per_slice_norm":
         coords_true = _position_normalize(coords_true)
         coords_pred = _position_normalize(coords_pred)
     elif rssd_frame != "as_written":
@@ -762,8 +775,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--rssd_frame",
-        default="per_slice_norm",
-        choices=("per_slice_norm", "as_written"),
+        default="luna",
+        choices=("luna", "per_slice_norm", "as_written"),
         help=(
             "Coordinate frame used for scoring. The methods do NOT write their "
             "metadata CSVs in a common frame: LUNA/G2T write the per-slice "
@@ -773,9 +786,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "rotation only (no scale), so it is homogeneous of degree 1 in "
             "coordinate scale and RSSD is NOT comparable across those groups -- "
             "this is why the checked-in mmc_luna table shows G2T 76 / LUNA 77 but "
-            "CeLEry 602,921. 'per_slice_norm' (default) min-max normalises BOTH "
-            "arrays per slice, each by its own bbox, reproducing LUNA's "
-            "convention for every method; it is near-idempotent for LUNA/G2T. "
+            "CeLEry 602,921. 'luna' (default) reproduces exactly the frame "
+            "LUNA/G2T write -- truth min-max normalised then mean-centred, "
+            "prediction min-max normalised -- for every method; it is exactly "
+            "idempotent for LUNA/G2T. 'per_slice_norm' min-max normalises both "
+            "without centring, which un-centres LUNA/G2T truth and shifts their "
+            "rotation-only RSSD by ~1.7%%; kept for comparison. "
             "'as_written' is the old, non-comparable behaviour. Changing this "
             "changes published CeLEry/novosparc numbers, so re-score all methods "
             "in one pass."
@@ -1037,9 +1053,9 @@ def main(argv: list[str] | None = None) -> int:
         f"backend={backend} workers={workers}"
     )
     print(f"[compute_extended] rssd_frame={args.rssd_frame}")
-    if args.rssd_frame == "per_slice_norm":
-        print("[compute_extended] NOTE: both metadata CSVs are min-max "
-              "normalised per slice before scoring, so RSSD is comparable "
+    if args.rssd_frame in ("luna", "per_slice_norm"):
+        print("[compute_extended] NOTE: metadata CSVs are re-framed per slice "
+              f"({args.rssd_frame}) before scoring, so RSSD is comparable "
               "across methods that write different coordinate frames "
               "(LUNA/G2T write [-0.5,0.5]; CeLEry/novosparc/CellContrast/COME "
               "write microns). This CHANGES previously published CeLEry/novosparc "
